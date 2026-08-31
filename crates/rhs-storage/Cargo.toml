@@ -1,0 +1,8 @@
+[package]
+name = "rhs-storage"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rhs-core = { path = "../rhs-core" }
+rhs-pipeline = { path = "../rhs-pipeline" }

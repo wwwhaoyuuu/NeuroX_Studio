@@ -1,0 +1,14 @@
+{
+  "name": "rhs-desktop-ui",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "build": "node scripts/build.cjs",
+    "dev": "node scripts/dev-server.cjs",
+    "preview": "node scripts/dev-server.cjs --dist",
+    "test": "node scripts/test-ui.cjs && node scripts/test-mea.mjs"
+  },
+  "devDependencies": {
+    "lucide": "0.468.0"
+  }
+}

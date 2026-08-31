@@ -1,0 +1,19 @@
+[package]
+name = "rhs-desktop"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rhs-core = { path = "../../../crates/rhs-core" }
+rhs-device = { path = "../../../crates/rhs-device" }
+rhs-nodes = { path = "../../../crates/rhs-nodes" }
+rhs-pipeline = { path = "../../../crates/rhs-pipeline" }
+rhs-storage = { path = "../../../crates/rhs-storage" }
+serde = { version = "1", features = ["derive"] }
+tauri = { version = "2" }
+
+[build-dependencies]
+tauri-build = { version = "2" }
+
+[dev-dependencies]
+serde_json = "1"

@@ -1,0 +1,17 @@
+[workspace]
+members = [
+    "crates/rhs-core",
+    "crates/rhs-device",
+    "crates/rhs-pipeline",
+    "crates/rhs-nodes",
+    "crates/rhs-storage",
+    "crates/rhs-stim",
+    "crates/rhs-runtime",
+    "crates/rhs-cli",
+    "apps/rhs-desktop/src-tauri",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"

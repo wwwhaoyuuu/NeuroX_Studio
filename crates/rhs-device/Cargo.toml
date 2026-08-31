@@ -1,0 +1,12 @@
+[package]
+name = "rhs-device"
+version.workspace = true
+edition.workspace = true
+build = "build.rs"
+
+[features]
+default = []
+legacy-direct-stim = []
+
+[dependencies]
+rhs-core = { path = "../rhs-core" }

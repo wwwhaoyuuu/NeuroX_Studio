@@ -1,0 +1,8 @@
+[package]
+name = "rhs-runtime"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rhs-device = { path = "../rhs-device" }
+rhs-stim = { path = "../rhs-stim" }

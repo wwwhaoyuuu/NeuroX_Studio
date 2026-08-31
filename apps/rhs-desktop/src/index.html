@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light" />
+    <title>RHS Studio</title>
+    <link rel="stylesheet" href="./styles.css" />
+    <script src="./vendor/lucide.js" defer></script>
+    <script type="module" src="./app.js"></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand-block">
+          <div class="brand-mark" aria-hidden="true"><i data-lucide="activity"></i></div>
+          <div>
+            <strong>RHS Studio</strong>
+            <span>微电极实验工作台</span>
+          </div>
+        </div>
+
+        <div class="transport" aria-label="采集控制">
+          <button class="icon-button" id="stop-acquisition" title="停止采集" disabled>
+            <i data-lucide="square"></i>
+          </button>
+          <button class="primary-command" id="start-acquisition">
+            <i data-lucide="play"></i><span>开始采集</span>
+          </button>
+          <button class="record-command" id="record-toggle" disabled>
+            <i data-lucide="circle"></i><span>开始记录</span>
+          </button>
+          <div class="session-clock" aria-label="采集时间">
+            <i data-lucide="timer"></i><span id="elapsed-time">00:00:00</span>
+          </div>
+        </div>
+
+        <div class="topbar-actions">
+          <div class="connection-state" id="connection-state">
+            <span class="status-dot"></span>
+            <span id="connection-label">未连接</span>
+          </div>
+          <button class="emergency-button" id="emergency-stop" title="立即禁用全部刺激输出">
+            <i data-lucide="octagon"></i><span>急停</span>
+          </button>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <aside class="left-panel">
+          <section class="panel-section device-section">
+            <div class="section-heading">
+              <div><span class="eyebrow">HARDWARE</span><h2>设备</h2></div>
+              <button class="icon-button subtle" id="scan-device" title="扫描设备">
+                <i data-lucide="refresh-cw"></i>
+              </button>
+            </div>
+            <div class="device-tile" id="device-tile">
+              <div class="device-icon"><i data-lucide="cpu"></i></div>
+              <div class="device-copy">
+                <strong id="device-name">RHS2116</strong>
+                <span id="device-route">等待扫描</span>
+              </div>
+              <span class="health-led" id="device-led"></span>
+            </div>
+            <label class="field compact-field">
+              <span>序列号</span>
+              <input id="device-serial" placeholder="留空自动检测" autocomplete="off" />
+            </label>
+            <details class="advanced-device">
+              <summary>FPGA 配置</summary>
+              <label class="field">
+                <span>Bitfile</span>
+                <input id="bitfile-path" placeholder="由 RHS_BITFILE 提供，或在此输入" autocomplete="off" />
+              </label>
+            </details>
+          </section>
+
+          <section class="panel-section pipeline-section">
+            <div class="section-heading">
+              <div><span class="eyebrow">PIPELINE</span><h2>处理链</h2></div>
+              <span class="count-badge" id="pipeline-node-count">1 节点</span>
+            </div>
+            <div class="pipeline-add-row">
+              <select id="pipeline-node-kind" aria-label="节点类型"></select>
+              <button class="icon-button" id="add-pipeline-node" title="添加处理节点">
+                <i data-lucide="plus"></i>
+              </button>
+            </div>
+            <div class="pipeline-preset-row">
+              <select id="pipeline-preset" aria-label="管线方案"><option value="">未保存方案</option></select>
+              <button class="icon-button subtle" id="load-pipeline-preset" title="载入方案" disabled><i data-lucide="folder-open"></i></button>
+              <button class="icon-button subtle" id="save-pipeline-preset" title="保存方案"><i data-lucide="save"></i></button>
+              <button class="icon-button subtle" id="delete-pipeline-preset" title="删除方案" disabled><i data-lucide="trash-2"></i></button>
+            </div>
+            <div class="pipeline-flow">
+              <div class="pipeline-node source-node">
+                <div class="node-symbol"><i data-lucide="radio-tower"></i></div>
+                <div class="source-node-copy"><strong>RHS Source</strong><span id="source-node-summary">16 ch · 30 kHz</span></div>
+                <span class="node-state">ON</span>
+                <label class="source-profile-field">
+                  <span>MEA 芯片型号</span>
+                  <select id="mea-profile" aria-label="MEA 芯片型号"></select>
+                </label>
+              </div>
+              <div class="pipeline-node-list" id="pipeline-node-list"></div>
+            </div>
+            <div class="pipeline-validation" id="pipeline-validation">
+              <i data-lucide="loader-circle"></i><span>正在读取节点注册表</span>
+            </div>
+          </section>
+        </aside>
+
+        <section class="data-panel">
+          <div class="data-toolbar">
+            <div class="tab-list" role="tablist">
+              <button class="tab active" data-view="waveform-view"><i data-lucide="audio-waveform"></i>波形</button>
+              <button class="tab" data-view="game-view"><i data-lucide="layout-grid"></i>游戏映射</button>
+              <button class="tab" data-view="performance-view"><i data-lucide="gauge"></i>性能</button>
+            </div>
+            <div class="display-tools">
+              <label class="toolbar-field">
+                <span>增益</span>
+                <input id="display-gain" type="range" min="0.25" max="4" step="0.25" value="1" />
+                <output id="gain-label">1.00×</output>
+              </label>
+              <select id="time-window" title="显示时窗">
+                <option value="100">100 ms</option>
+                <option value="250" selected>250 ms</option>
+                <option value="500">500 ms</option>
+                <option value="1000">1 s</option>
+              </select>
+              <button class="icon-button dark-tool" id="pause-display" title="暂停波形显示"><i data-lucide="pause"></i></button>
+              <button class="icon-button dark-tool" id="fit-waveform" title="适配波形高度"><i data-lucide="maximize-2"></i></button>
+            </div>
+          </div>
+
+          <div class="view-stack">
+            <div class="view-panel active" id="waveform-view">
+              <div class="waveform-shell">
+                <div class="channel-labels" id="channel-labels"></div>
+                <div class="plot-area">
+                  <canvas id="waveform" aria-label="16 通道实时波形"></canvas>
+                  <div class="plot-empty" id="plot-empty">
+                    <i data-lucide="activity"></i>
+                    <strong>等待采集数据</strong>
+                    <span>RHS2116 · 16 channels</span>
+                  </div>
+                  <div class="plot-badge"><span id="plot-rate">30.0 kHz</span><span id="plot-mode">RAW</span></div>
+                </div>
+              </div>
+              <div class="metrics-strip">
+                <div><span>样本率</span><strong id="metric-sample-rate">—</strong></div>
+                <div><span>数据吞吐</span><strong id="metric-throughput">—</strong></div>
+                <div><span>时间戳断裂</span><strong id="metric-gaps">0</strong></div>
+                <div><span>队列溢出</span><strong id="metric-overflows">0</strong></div>
+                <div><span>最新块</span><strong id="metric-sequence">—</strong></div>
+              </div>
+            </div>
+
+            <div class="view-panel performance-view" id="performance-view">
+              <div class="performance-grid">
+                <article class="metric-module"><span>采集样本</span><strong id="perf-samples">0</strong><small>per channel</small></article>
+                <article class="metric-module"><span>接收数据</span><strong id="perf-bytes">0 B</strong><small>FrontPanel stream</small></article>
+                <article class="metric-module"><span>空读取</span><strong id="perf-empty">0</strong><small>worker polls</small></article>
+                <article class="metric-module"><span>阈值事件</span><strong id="perf-threshold">0</strong><small>bounded event queue</small></article>
+              </div>
+              <div class="health-table">
+                <div class="health-row"><span><i data-lucide="usb"></i>USB / FrontPanel</span><strong id="health-usb">待机</strong></div>
+                <div class="health-row"><span><i data-lucide="clock-3"></i>采样时间轴</span><strong id="health-timeline">连续</strong></div>
+                <div class="health-row"><span><i data-lucide="database"></i>记录写入</span><strong id="health-storage">未启用</strong></div>
+                <div class="health-row"><span><i data-lucide="shield-check"></i>刺激联锁</span><strong class="locked-text">已锁定</strong></div>
+              </div>
+            </div>
+
+            <div class="view-panel game-view" id="game-view">
+              <header class="game-view-heading">
+                <div>
+                  <span class="eyebrow">GAME CHANNEL MAP</span>
+                  <strong id="game-profile-name">RHS2116</strong>
+                </div>
+                <div class="game-map-stats">
+                  <span><small>阵列</small><strong id="game-array-size">4×4</strong></span>
+                  <span><small>电极</small><strong id="game-channel-count">16</strong></span>
+                  <span><small>刺激选择</small><strong id="game-stim-count">1</strong></span>
+                  <span><small>当前通道</small><strong id="game-focus-channel">CH-01</strong></span>
+                </div>
+              </header>
+              <div class="game-map-stage">
+                <div class="mea-grid game-mea-grid" id="game-mea-grid" aria-label="游戏通道映射"></div>
+              </div>
+              <footer class="game-map-legend">
+                <span><i class="legend-dot available"></i>可用电极</span>
+                <span><i class="legend-dot selected"></i>刺激选择</span>
+                <span><i class="legend-dot focused"></i>游戏焦点</span>
+              </footer>
+            </div>
+          </div>
+        </section>
+
+        <aside class="right-panel">
+          <section class="panel-section acquisition-section">
+            <div class="section-heading"><div><span class="eyebrow">SESSION</span><h2>采集</h2></div><span class="mode-chip" id="mode-chip">IDLE</span></div>
+            <div class="two-column-fields">
+              <label class="field"><span>批量块数</span><input id="blocks-per-read" type="number" min="1" max="32" value="8" /></label>
+              <label class="field"><span>队列容量</span><input id="queue-capacity" type="number" min="1" max="128" value="8" /></label>
+            </div>
+            <div class="recording-box">
+              <div class="recording-title"><span><i data-lucide="database"></i>原始记录</span><strong id="record-status">OFF</strong></div>
+              <label class="field"><span>文件</span><input id="recording-path" autocomplete="off" /></label>
+              <div class="storage-caption"><span>RHSRAW v1</span><span id="record-blocks">0 blocks</span></div>
+            </div>
+          </section>
+
+          <section class="panel-section stim-section">
+            <div class="section-heading">
+              <div><span class="eyebrow">STIM PILOT</span><h2>刺激</h2></div>
+              <span class="interlock-badge"><i data-lucide="lock-keyhole"></i>联锁</span>
+            </div>
+            <div class="safety-banner">
+              <i data-lucide="shield-alert"></i>
+              <div><strong>台架验证待完成</strong><span>真实 Arm 与 Trigger 已锁定</span></div>
+            </div>
+            <button class="stim-config-command" id="open-stim-config">
+              <span><i data-lucide="layout-grid"></i><strong>配置通道与参数</strong></span>
+              <i data-lucide="chevron-right"></i>
+            </button>
+            <div class="stim-parameters">
+              <div><span>通道</span><strong id="stim-channel-summary">CH-01</strong></div>
+              <div><span>幅度</span><strong id="stim-amplitude-summary">10 nA</strong></div>
+              <div><span>脉冲</span><strong id="stim-pulse-summary">1</strong></div>
+              <div><span>相宽</span><strong id="stim-width-summary">200 µs</strong></div>
+            </div>
+            <div class="stim-actions">
+              <button class="secondary-command" disabled><i data-lucide="shield"></i>Arm</button>
+              <button class="trigger-command" disabled><i data-lucide="zap"></i>Trigger</button>
+            </div>
+            <div class="stim-state-row"><span>输出状态</span><strong><span class="status-dot safe"></span>DISABLED</strong></div>
+          </section>
+        </aside>
+
+        <section class="event-console">
+          <div class="console-heading">
+            <div class="console-title"><i data-lucide="list-tree"></i><strong>事件</strong><span id="event-count">0</span></div>
+            <div class="console-filters">
+              <button class="filter-chip active" data-level="all">全部</button>
+              <button class="filter-chip" data-level="error">错误</button>
+              <button class="icon-button subtle" id="clear-events" title="清空界面事件"><i data-lucide="trash-2"></i></button>
+              <button class="icon-button subtle" id="toggle-console" title="折叠事件面板"><i data-lucide="chevron-down"></i></button>
+            </div>
+          </div>
+          <div class="event-log" id="event-log" role="log"></div>
+        </section>
+      </main>
+      <div class="toast-region" id="toast-region" aria-live="polite"></div>
+    </div>
+    <dialog class="pipeline-dialog" id="pipeline-preset-dialog">
+      <form id="pipeline-preset-form">
+        <div class="dialog-heading">
+          <div class="dialog-symbol"><i data-lucide="save"></i></div>
+          <div><strong>保存管线方案</strong><span>Pipeline v1</span></div>
+        </div>
+        <label class="field">
+          <span>方案名称</span>
+          <input id="pipeline-preset-name" maxlength="40" autocomplete="off" required />
+        </label>
+        <div class="dialog-actions">
+          <button type="button" class="secondary-command" id="cancel-pipeline-preset">取消</button>
+          <button type="submit" class="primary-command"><i data-lucide="save"></i>保存</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog class="stim-config-dialog" id="stim-config-dialog">
+      <form id="stim-config-form">
+        <header class="stim-dialog-heading">
+          <div>
+            <span class="dialog-symbol"><i data-lucide="waypoints"></i></span>
+            <div><strong>MEA 多通道刺激配置</strong><span id="stim-dialog-profile">RHS2116 · 4×4</span></div>
+          </div>
+          <button type="button" class="icon-button subtle" id="close-stim-config" title="关闭"><i data-lucide="x"></i></button>
+        </header>
+        <div class="stim-dialog-body">
+          <section class="stim-channel-pane">
+            <div class="stim-pane-heading">
+              <div><span class="eyebrow">ELECTRODE ARRAY</span><strong>通道选择</strong></div>
+              <span id="stim-selected-count">1 / 16</span>
+            </div>
+            <div class="selection-presets" role="group" aria-label="通道选择预设">
+              <button type="button" data-selection-preset="all"><i data-lucide="circle-check-big"></i>全选</button>
+              <button type="button" data-selection-preset="none"><i data-lucide="circle-off"></i>全不选</button>
+              <button type="button" data-selection-preset="center"><i data-lucide="scan"></i>中心区</button>
+              <button type="button" data-selection-preset="perimeter"><i data-lucide="box-select"></i>外围</button>
+            </div>
+            <div class="stim-mea-stage">
+              <div class="mea-grid stim-mea-grid" id="stim-mea-grid" aria-label="MEA 刺激通道选择"></div>
+            </div>
+            <div class="stim-array-caption"><span id="stim-array-source">当前采集后端</span><strong id="stim-last-channel">CH-01</strong></div>
+          </section>
+          <section class="stim-parameter-pane">
+            <div class="stim-pane-heading">
+              <div><span class="eyebrow">STIM PARAMETERS</span><strong>刺激参数</strong></div>
+              <span class="interlock-badge"><i data-lucide="lock-keyhole"></i>仅保存配置</span>
+            </div>
+            <label class="field">
+              <span>参数预设</span>
+              <select id="stim-parameter-preset"></select>
+            </label>
+            <div class="stim-form-grid">
+              <label class="field"><span>波形</span><select id="stim-waveform"><option value="biphasic">双相</option><option value="biphasic-delay">双相 + 相间隔</option><option value="triphasic">三相</option></select></label>
+              <label class="field"><span>幅度 · nA</span><input id="stim-amplitude" type="number" min="0" max="1000000" step="10" /></label>
+              <label class="field"><span>相宽 · µs</span><input id="stim-phase-width" type="number" min="1" max="1000000" step="1" /></label>
+              <label class="field"><span>相间隔 · µs</span><input id="stim-interphase" type="number" min="0" max="1000000" step="1" /></label>
+              <label class="field"><span>频率 · Hz</span><input id="stim-frequency" type="number" min="0.1" max="1000" step="0.1" /></label>
+              <label class="field"><span>脉冲数</span><input id="stim-pulse-count" type="number" min="1" max="10000" step="1" /></label>
+            </div>
+            <label class="charge-recovery-row">
+              <span><strong>电荷恢复</strong><small>Charge recovery</small></span>
+              <input id="stim-charge-recovery" type="checkbox" />
+              <span class="switch" aria-hidden="true"></span>
+            </label>
+            <div class="stim-config-lock">
+              <i data-lucide="shield-alert"></i>
+              <div><strong>输出联锁保持启用</strong><span>此窗口只生成通道与参数配置，不会 Arm 或 Trigger。</span></div>
+            </div>
+          </section>
+        </div>
+        <footer class="stim-dialog-actions">
+          <span><i data-lucide="database"></i>配置按 MEA 型号分别保存</span>
+          <div>
+            <button type="button" class="secondary-command" id="cancel-stim-config">取消</button>
+            <button type="submit" class="primary-command"><i data-lucide="save"></i>保存配置</button>
+          </div>
+        </footer>
+      </form>
+    </dialog>
+  </body>
+</html>
