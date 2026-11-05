@@ -1106,3 +1106,25 @@ Rust 测试覆盖节点顺序、多 threshold 接收器、重复 ID、未知版�
   on other pages, preserve other profiles and persist through session recovery.
   Playwright checks pass for all 16/64/120 entries, invalid-input non-mutation,
   individual overrides after bulk application, focused detail and isolated reset.
+
+## 2026-11-05 Hardware Deployment Bundle
+
+- Adds the exact board-provided lab bitfile and unmodified FrontPanel 5.2.10
+  amd64 driver directory to an opt-in binary package. Seven hardware payload
+  hashes are pinned in `scripts/hardware-payload.json`; both driver catalogs
+  verify as signed by Opal Kelly Incorporated. SDK/private files stay out of Git.
+- Driver-helper dry runs accept the complete payload and reject missing files
+  or invalid arguments without installing a driver. Normal installation requires
+  administrator rights and explicit confirmation, uses only USB INF installation,
+  and does not force replacement, delete drivers, reboot or alter security policy.
+- `scripts/Test-ReleasePackage.ps1 -Version 2026.11.05-hardware1` verifies every
+  runtime ZIP entry against manifest sizes/hashes and the unpacked payload,
+  pinned hardware hashes, catalog signatures, helper dry run, source file list
+  and archive checksums. It also supports the original minimal release policy.
+- The publisher's Windows PowerShell 5 mock regression covers argument boundaries,
+  initial draft creation, upload, downloaded-file checksums, publication gating
+  and retry. Mock results are not evidence of a real GitHub publication.
+- The application EXE is unchanged from 2026.11.05. This deployment change does
+  not install drivers, open boards, load FPGA firmware or send stimulation during
+  validation. A fresh-PC installation and physical output qualification remain
+  untested; neither a valid file hash nor driver signature proves hardware output.

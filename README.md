@@ -15,26 +15,34 @@
 | Microsoft Edge WebView2 Runtime（Evergreen） | 必需；已经安装则不必重复安装。仅有 Edge 浏览器不等同于已满足此项 | [微软官方下载](https://developer.microsoft.com/microsoft-edge/webview2/)；离线机器选择 x64 Standalone Installer |
 | Microsoft Visual C++ v14 Redistributable x64 | 必需；与构建工具相同或更新版本，建议安装最新支持版 | [微软说明](https://learn.microsoft.com/cpp/windows/latest-supported-vc-redist)、[x64 安装程序](https://aka.ms/vc14/vc_redist.x64.exe) |
 | FrontPanel 5.2.10 x64 API DLL | 本 EXE 原生链接所需，即使只打开界面也必须可加载 | 发布包已包含 `okFrontPanel.dll`，保留在 EXE 同目录；不要从第三方 DLL 网站下载 |
-| Opal Kelly FrontPanel USB 驱动 | **连接真实板卡时必需**；DLL 不会代替驱动 | 从板卡提供方或 [Opal Kelly 官方下载入口](https://pins.opalkelly.com/) 获取适配设备的 FrontPanel/Driver-Only Windows 安装包，按安装向导安装驱动 |
-| 匹配板卡的 `ConfigRHSController.bit` | **真实扫描、采集和刺激时必需** | 从该板卡的提供方取得正确固件，放在 EXE 同目录，或在 FPGA 配置中选择完整路径；本公共发布不附带特定板卡固件，不能用任意同名 bit 文件替代 |
+| Opal Kelly FrontPanel USB 驱动 | **连接真实板卡时必需**；DLL 不会代替驱动 | `2026.11.05-hardware1` 硬件包已包含原始 x64 驱动；首次安装右键 `Install-USB-Driver.cmd` → 以管理员身份运行，再确认安装。已能使用同款板卡的电脑通常不必重复安装 |
+| 匹配板卡的 `ConfigRHSController.bit` | **真实扫描、采集和刺激时必需** | `2026.11.05-hardware1` 硬件包已附带本实验室同款控制板使用的固件，位于 EXE 同目录；仅适用于匹配的 FPGA/板卡，不能因文件同名就用于其他型号 |
 
 使用发布版 **不需要** 下载 Rust/Cargo、Node.js/npm、Python、Visual Studio、VS Code、
 Intan RHX 完整软件或完整 FrontPanel SDK。这些是开发工具或可选分析工具，不是日常运行依赖。
 首次安装驱动和系统运行库可能需要管理员权限；NeuroX 本身建议以普通用户权限运行。
 
-解压后的结构（固件由用户补充）：
+建议同款硬件用户下载 `NeuroX-Studio-2026.11.05-hardware1-windows-x64.zip`。
+首次部署完整步骤见 [同款硬件部署](HARDWARE_SETUP.md)。原 `2026.11.05` 包未附带驱动和固件，
+不会自动变成硬件包。微软的 WebView2 和 VC++ 运行库仍需按上表安装，不包含在此 ZIP 中。
+
+硬件包解压后的结构：
 
 ```text
 NeuroX-Studio-...-windows-x64/
   NeuroX Studio.exe
   okFrontPanel.dll
   Check-Dependencies.ps1
+  Install-USB-Driver.cmd       <- 首次装 USB 驱动，需管理员权限
+  drivers/amd64/              <- 原始 INF、签名目录和配套文件
+  HARDWARE_SETUP.md
   README.md
   THIRD_PARTY_NOTICES.md
   COPYING
   licenses/FrontPanel-LICENSE.txt
   manifest.json
-  ConfigRHSController.bit       <- 使用真实板卡前自行放入
+  ConfigRHSController.bit      <- 同款实验室板卡固件，已包含
+  hardware-payload.json        <- 固件/驱动来源与逐文件 SHA-256
 ```
 
 可在 PowerShell 中运行 `./Check-Dependencies.ps1`，只读检查 WebView2、VC++、DLL、固件和
@@ -47,7 +55,7 @@ NeuroX-Studio-...-windows-x64/
 - `okFrontPanel.dll` 找不到：重新完整解压发布包，保持 DLL 与 EXE 相邻。
 - `VCRUNTIME140*.dll` / `MSVCP140.dll` 找不到：安装或修复微软最新 x64 VC++ v14 运行库。
 - 窗口无法创建、WebView2 错误：安装 WebView2 Runtime 后重试；无需启动 `127.0.0.1:1420`。
-- `bitfile` 找不到：补充匹配的 `ConfigRHSController.bit`，或在 FPGA 配置中指定路径。
+- `bitfile` 找不到：确认使用完整解压的硬件包，EXE 旁应有 `ConfigRHSController.bit`；旧电脑若保存过失效的 FPGA 路径，在配置中重新选择此文件。
 - `no FrontPanel device detected`：检查驱动、供电、数据 USB 连接，并关闭占用板卡的 RHX 或其他 NeuroX 实例。
 - 看不到真实数据：公开 EXE 不会凭空提供硬件；120 电极布局只支持显示/模拟，不代表 120 路真实硬件已经支持。
 
@@ -473,14 +481,17 @@ cd ../..
 After committing the intended source changes, run:
 
 ```powershell
-./scripts/package-release.ps1 -Version 2026.11.05
+./scripts/package-release.ps1 -Version 2026.11.05-hardware1 -IncludeHardware
 ```
 
 This requires a clean source tree and FrontPanel 5.2.10. It produces a portable
 x64 EXE ZIP, an exact `git archive HEAD` corresponding-source ZIP and a SHA-256
 file in the ignored `releases/` directory. The manifest records the source commit,
-included files and dependency versions. Specific board firmware, credentials,
-local settings, recordings and generated build/cache directories are excluded.
+included files and dependency versions. With `-IncludeHardware`, the exact lab
+bitfile and original amd64 driver payload pinned in `scripts/hardware-payload.json`
+are included after hash and driver-catalog signature checks. Without that switch,
+firmware and drivers are excluded. Credentials, local settings, recordings and
+generated build/cache directories are always excluded.
 Publish both ZIPs and the checksum file together. This is not an installer and
 does not silently install system runtimes/drivers or unlock stimulation.
 
@@ -490,6 +501,7 @@ does not silently install system runtimes/drivers or unlock stimulation.
 sources used by the native bridge. Those files are distributed under GPL-3.0; the
 corresponding license text is included beside them and at `COPYING`. The source
 repository does not include the proprietary FrontPanel SDK, drivers, DLLs or
-board-specific FPGA bitfiles. Portable binary releases include only the required
-FrontPanel API DLL with its license, as documented in
+board-specific FPGA bitfiles. Portable binary releases include the required
+FrontPanel API DLL with its license; hardware bundles additionally contain the
+original USB drivers and matching lab bitfile, as documented in
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

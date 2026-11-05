@@ -42,11 +42,19 @@ $vc = Get-ItemProperty -LiteralPath "HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\
 $version = if ($vc) { $vc.Version } else { "not registered" }
 Report ($null -ne $vc -and $vc.Installed -eq 1) "Visual C++ v14 x64 Runtime" "Detected: $version . Install the latest x64 package: https://aka.ms/vc14/vc_redist.x64.exe"
 if (-not $SkipFirmware) {
-    Report (Test-Path -LiteralPath (Join-Path $directory "ConfigRHSController.bit") -PathType Leaf) "FPGA bitfile for hardware" "Obtain a matching bitfile from the board provider, or choose its path in FPGA settings"
+    $bitfile = Join-Path $directory "ConfigRHSController.bit"
+    $payloadPath = Join-Path $directory "hardware-payload.json"
+    $firmwareOkay = Test-Path -LiteralPath $bitfile -PathType Leaf
+    if ($firmwareOkay -and (Test-Path -LiteralPath $payloadPath)) {
+        $payload = Get-Content -LiteralPath $payloadPath -Raw | ConvertFrom-Json
+        $expected = @($payload.files | Where-Object name -EQ "ConfigRHSController.bit")
+        $firmwareOkay = $expected.Count -eq 1 -and (Get-FileHash -LiteralPath $bitfile -Algorithm SHA256).Hash -eq $expected[0].sha256
+    }
+    Report $firmwareOkay "FPGA bitfile for hardware" "Hardware bundle includes the matching lab bitfile; retain it beside the EXE. Other boards require their own compatible firmware."
 }
 Write-Output ""
 Write-Output "USB driver/device availability and firmware compatibility are NOT verified by this read-only check."
-Write-Output "Install the official FrontPanel USB driver before connecting hardware; close other apps using the board."
+Write-Output "If needed, install the bundled USB driver as administrator using Install-USB-Driver.cmd; close other apps using the board."
 Write-Output "No board was opened, no firmware was uploaded, and no stimulation was sent."
 if ($script:failures -gt 0) { exit 1 }
 exit 0

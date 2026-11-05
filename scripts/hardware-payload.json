@@ -1,0 +1,43 @@
+{
+  "profile": "lab-rhs-16-64-frontpanel-5.2.10",
+  "scope": "Existing lab controller and matching FPGA only; not a universal RHS2116 firmware.",
+  "firmwareProvenance": "Board-specific ConfigRHSController.bit supplied with the lab hardware; included at the hardware owner's request. Vendor rights are retained; no new firmware license is granted.",
+  "driverProvenance": "Unmodified amd64 driver directory from FrontPanelUSB 5.2.10; FrontPanel License Agreement applies.",
+  "files": [
+    {
+      "name": "ConfigRHSController.bit",
+      "source": "RHS_BITFILE",
+      "sha256": "a93911b1d49d7c51e922cbbaa9aa0241690e845e5b3e3682ef833db95b5016f3"
+    },
+    {
+      "name": "drivers/amd64/okuart.cat",
+      "source": "Driver/amd64/okuart.cat",
+      "sha256": "23ce59a205642b1c92f04a1fe956707e0d98ceadb5b94b4f6235b2d6cb6f2860"
+    },
+    {
+      "name": "drivers/amd64/okuart.inf",
+      "source": "Driver/amd64/okuart.inf",
+      "sha256": "f455daf063dd58c21a8961058aba485b1b7ca1abaa77ce83d4022533cb203a52"
+    },
+    {
+      "name": "drivers/amd64/okusb.cat",
+      "source": "Driver/amd64/okusb.cat",
+      "sha256": "dc0b2cc546b6fcf2718951bc757ba32d312fc17cd0ad3698181a66354a2d6cf6"
+    },
+    {
+      "name": "drivers/amd64/okusb.inf",
+      "source": "Driver/amd64/okusb.inf",
+      "sha256": "47cea58f894ca1f1ca2787941bbc2230ae92d6fea644321ae275bd8a4d046773"
+    },
+    {
+      "name": "drivers/amd64/WdfCoInstaller01009.dll",
+      "source": "Driver/amd64/WdfCoInstaller01009.dll",
+      "sha256": "18487b4ff94edccc98ed59d9fca662d4a1331c5f1e14df8db3093256dd9f1c3e"
+    },
+    {
+      "name": "drivers/amd64/WinUSBCoInstaller2.dll",
+      "source": "Driver/amd64/WinUSBCoInstaller2.dll",
+      "sha256": "981a17effddbc20377512ddaec9f22c2b7067e17a3e2a8ccf82bb7bb7b2420b6"
+    }
+  ]
+}

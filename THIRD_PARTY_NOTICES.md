@@ -17,8 +17,12 @@ The Windows binary depends on Opal Kelly FrontPanel. The distributed x64
 in `licenses/FrontPanel-LICENSE.txt` inside the portable package. It is distributed
 for use with Opal Kelly devices or devices incorporating its firmware, under the
 FrontPanel License Agreement. This does not relicense the FrontPanel SDK under
-GPL. FrontPanel SDK headers/import libraries and USB driver installers are not
-included in the source archive. See the official distribution guidance:
+GPL. Hardware bundles also contain the unmodified amd64 USB/UART driver files
+from FrontPanelUSB 5.2.10 under that same FrontPanel license, including the
+original signed catalogs and coinstallers. The optional installation helper
+installs only the USB INF through Windows PnPUtil. FrontPanel SDK headers/import
+libraries, drivers and runtime DLLs are not included in the source archive.
+See the official distribution guidance:
 https://docs.opalkelly.com/fpsdk/licensing/ .
 
 The interface uses Lucide icons (ISC license), bundled from the pinned npm
@@ -27,5 +31,11 @@ Other Rust dependencies retain their own licenses; exact versions are recorded
 in `Cargo.lock`. Microsoft WebView2 and Visual C++ runtimes are separate Microsoft
 components, installed from Microsoft, not redistributed in this package.
 
-Board-specific FPGA bitfiles, experiment recordings, personal channel settings,
-credentials and local workstation paths are not included in public releases.
+The 2026.11.05-hardware1 binary bundle includes the existing lab controller's
+board-supplied ConfigRHSController.bit, at the hardware owner's request, for the
+matching hardware. Original vendor rights remain; inclusion grants no new
+firmware license and does not place that binary under GPL. Its exact SHA-256,
+provenance and scope are recorded in hardware-payload.json. No FPGA source or
+general-purpose compatibility is claimed. The bitfile is not in the source ZIP.
+Experiment recordings, personal settings, credentials and local workstation
+paths are excluded from both release ZIPs.
