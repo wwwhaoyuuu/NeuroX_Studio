@@ -2506,6 +2506,7 @@ dependencies = [
  "rhs-pipeline",
  "rhs-stim",
  "rhs-storage",
+ "serde_json",
 ]
 
 [[package]]

@@ -39,10 +39,12 @@
 
 真实输出命令要求两个独立确认：
 
+`--channel` 使用芯片内编号 1–16，必须显式指定；`--serial`、`--port` 和 `--stream` 也必须显式指定。台架入口接受一颗 RHS2116 或 B/C 各两颗的四芯片扫描结果，但每次只测试一条物理通道。逐路测试前，必须核对该通道对应的实际接脚与负载接法，不能仅凭界面编号推断接线。
+
 ```powershell
-.\scripts\dev-cmd.bat stim --preset bench-single-v1 --operator NAME --confirm-dummy-load --confirm-measurement-ready
-.\scripts\dev-cmd.bat stim --preset bench-train-v1 --operator NAME --confirm-dummy-load --confirm-measurement-ready
-.\scripts\dev-cmd.bat stim --preset bench-train-v1 --operator NAME --confirm-dummy-load --confirm-measurement-ready --emergency-stop-after-ms 150
+.\scripts\dev-cmd.bat stim --serial SERIAL --port A --stream 0 --channel 1 --preset bench-single-v1 --operator NAME --confirm-dummy-load --confirm-measurement-ready
+.\scripts\dev-cmd.bat stim --serial SERIAL --port A --stream 0 --channel 1 --preset bench-train-v1 --operator NAME --confirm-dummy-load --confirm-measurement-ready
+.\scripts\dev-cmd.bat stim --serial SERIAL --port A --stream 0 --channel 1 --preset bench-train-v1 --operator NAME --confirm-dummy-load --confirm-measurement-ready --emergency-stop-after-ms 150
 ```
 
 ## 立即停止条件

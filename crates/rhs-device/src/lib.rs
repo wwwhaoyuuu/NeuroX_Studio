@@ -2,8 +2,8 @@ mod acquisition;
 
 pub use acquisition::{
     AcquisitionBatch, AcquisitionConfig, AcquisitionHandle, AcquisitionInfo, AcquisitionStats,
-    AcquisitionStimEvent, AcquisitionStimState, AcquisitionWorkerConfig, ScheduledStimRequest,
-    WorkerStatus,
+    AcquisitionStimEvent, AcquisitionStimState, AcquisitionWorkerConfig, ImpedanceMeasurement,
+    ScheduledStimRequest, WorkerStatus,
 };
 pub use rhs_core::{DeviceError, DeviceErrorCode, StimStepSize};
 
@@ -17,9 +17,20 @@ pub const DEFAULT_BITFILE: &str = "ConfigRHSController.bit";
 const RHS_SCAN_MAX_RESULTS: usize = 8;
 
 pub fn configured_bitfile() -> PathBuf {
-    std::env::var_os("RHS_BITFILE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_BITFILE))
+    if let Some(path) = std::env::var_os("RHS_BITFILE").filter(|value| !value.is_empty()) {
+        return PathBuf::from(path);
+    }
+
+    if let Ok(executable) = std::env::current_exe() {
+        if let Some(directory) = executable.parent() {
+            let bundled = directory.join(DEFAULT_BITFILE);
+            if bundled.is_file() {
+                return bundled;
+            }
+        }
+    }
+
+    PathBuf::from(DEFAULT_BITFILE)
 }
 
 #[repr(C)]
@@ -37,6 +48,7 @@ struct RawScanResult {
 #[repr(C)]
 struct RawStimConfig {
     channel: c_int,
+    channel_mask: c_int,
     trigger: c_int,
     pulses: c_int,
     magnitude_steps: c_int,
@@ -44,6 +56,7 @@ struct RawStimConfig {
     phase_steps: c_int,
     interphase_steps: c_int,
     period_steps: c_int,
+    stream_masks: [c_int; RHS_SCAN_MAX_RESULTS],
 }
 
 #[repr(C)]
@@ -62,6 +75,15 @@ extern "C" {
     fn rhs_stim_open(
         bitfile_path: *const c_char,
         serial: *const c_char,
+        out_session: *mut *mut RawStimSession,
+        out: *mut RawScanResult,
+    ) -> c_int;
+
+    fn rhs_stim_open_target(
+        bitfile_path: *const c_char,
+        serial: *const c_char,
+        expected_port: c_int,
+        expected_stream: c_int,
         out_session: *mut *mut RawStimSession,
         out: *mut RawScanResult,
     ) -> c_int;
@@ -129,6 +151,7 @@ pub struct ScanReport {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StimConfig {
     pub channel: i32,
+    pub channel_mask: u16,
     pub trigger: i32,
     pub pulses: i32,
     pub magnitude_steps: i32,
@@ -136,6 +159,7 @@ pub struct StimConfig {
     pub phase_steps: i32,
     pub interphase_steps: i32,
     pub period_steps: i32,
+    pub stream_masks: [u16; RHS_SCAN_MAX_RESULTS],
 }
 
 #[derive(Debug, Clone)]
@@ -153,6 +177,7 @@ impl Default for StimConfig {
     fn default() -> Self {
         Self {
             channel: 0,
+            channel_mask: 0,
             trigger: 0,
             pulses: 1,
             magnitude_steps: 1,
@@ -160,7 +185,14 @@ impl Default for StimConfig {
             phase_steps: 6,
             interphase_steps: 3,
             period_steps: 3000,
+            stream_masks: [0; RHS_SCAN_MAX_RESULTS],
         }
+    }
+}
+
+impl StimConfig {
+    pub fn validate(&self) -> Result<(), Error> {
+        validate_stim_config(self)
     }
 }
 
@@ -211,17 +243,48 @@ impl RhsDevice {
     }
 
     pub fn open_stim_session(&self) -> Result<(StimHardwareSession, ScanReport), Error> {
+        self.open_stim_session_at(None)
+    }
+
+    pub fn open_stim_session_target(
+        &self,
+        port_index: u8,
+        stream: u8,
+    ) -> Result<(StimHardwareSession, ScanReport), Error> {
+        if port_index > 3 || stream > 7 {
+            return Err(Error::new(
+                "targeted stimulation port or stream is out of range",
+            ));
+        }
+        self.open_stim_session_at(Some((port_index, stream)))
+    }
+
+    fn open_stim_session_at(
+        &self,
+        target: Option<(u8, u8)>,
+    ) -> Result<(StimHardwareSession, ScanReport), Error> {
         let bitfile = c_path(&self.bitfile)?;
         let serial = c_optional(&self.serial)?;
         let mut raw_session = std::ptr::null_mut();
         let mut raw_report = RawScanResult::empty();
+        let serial_ptr = serial.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
         let return_code = unsafe {
-            rhs_stim_open(
-                bitfile.as_ptr(),
-                serial.as_ref().map_or(std::ptr::null(), |s| s.as_ptr()),
-                &mut raw_session,
-                &mut raw_report,
-            )
+            match target {
+                Some((port, stream)) => rhs_stim_open_target(
+                    bitfile.as_ptr(),
+                    serial_ptr,
+                    c_int::from(port),
+                    c_int::from(stream),
+                    &mut raw_session,
+                    &mut raw_report,
+                ),
+                None => rhs_stim_open(
+                    bitfile.as_ptr(),
+                    serial_ptr,
+                    &mut raw_session,
+                    &mut raw_report,
+                ),
+            }
         };
         let report = raw_report.into_report();
         if return_code < 0 || report.return_code < 0 {
@@ -246,6 +309,7 @@ impl RhsDevice {
         let serial = c_optional(&self.serial)?;
         let raw_config = RawStimConfig {
             channel: config.channel,
+            channel_mask: i32::from(config.channel_mask),
             trigger: config.trigger,
             pulses: config.pulses,
             magnitude_steps: config.magnitude_steps,
@@ -253,6 +317,7 @@ impl RhsDevice {
             phase_steps: config.phase_steps,
             interphase_steps: config.interphase_steps,
             period_steps: config.period_steps,
+            stream_masks: config.stream_masks.map(i32::from),
         };
         let mut raw = RawScanResult::empty();
 
@@ -282,6 +347,11 @@ impl StimHardwareSession {
             return Err(Error::new("a stimulation command is already active"));
         }
         validate_stim_config(&config)?;
+        if config.stream_masks.iter().any(|mask| *mask != 0) {
+            return Err(Error::new(
+                "multi-stream stimulation requires an acquisition session",
+            ));
+        }
         let raw_config = RawStimConfig::from(&config);
         let mut raw_report = RawScanResult::empty();
         let return_code =
@@ -340,6 +410,7 @@ impl From<&StimConfig> for RawStimConfig {
     fn from(config: &StimConfig) -> Self {
         Self {
             channel: config.channel,
+            channel_mask: i32::from(config.channel_mask),
             trigger: config.trigger,
             pulses: config.pulses,
             magnitude_steps: config.magnitude_steps,
@@ -347,6 +418,7 @@ impl From<&StimConfig> for RawStimConfig {
             phase_steps: config.phase_steps,
             interphase_steps: config.interphase_steps,
             period_steps: config.period_steps,
+            stream_masks: config.stream_masks.map(i32::from),
         }
     }
 }
@@ -413,6 +485,9 @@ fn c_optional(value: &Option<String>) -> Result<Option<CString>, Error> {
 fn validate_stim_config(config: &StimConfig) -> Result<(), Error> {
     if !(0..=15).contains(&config.channel) {
         return Err(Error::new("channel must be 0..15"));
+    }
+    if config.channel_mask != 0 && config.channel_mask & (1_u16 << config.channel) == 0 {
+        return Err(Error::new("channel_mask must include the primary channel"));
     }
     if !(0..=7).contains(&config.trigger) {
         return Err(Error::new("trigger must be 0..7"));
@@ -512,5 +587,29 @@ mod tests {
         };
         let error = validate_stim_config(&config).unwrap_err();
         assert!(error.to_string().contains("FPGA timestep limit"));
+    }
+
+    #[test]
+    fn accepts_all_sixteen_channels_in_one_rhs2116_mask() {
+        let config = StimConfig {
+            channel: 0,
+            channel_mask: u16::MAX,
+            ..StimConfig::default()
+        };
+        validate_stim_config(&config).unwrap();
+        assert_eq!(RawStimConfig::from(&config).channel_mask, 0xffff);
+    }
+
+    #[test]
+    fn rejects_mask_that_excludes_primary_channel() {
+        let config = StimConfig {
+            channel: 3,
+            channel_mask: 0b11,
+            ..StimConfig::default()
+        };
+        assert!(validate_stim_config(&config)
+            .unwrap_err()
+            .to_string()
+            .contains("include the primary channel"));
     }
 }

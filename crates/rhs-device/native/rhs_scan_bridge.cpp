@@ -1,4 +1,7 @@
 #include "rhs_scan_bridge.h"
+#include "rhs_stim_sequence.h"
+#include "rhs_stream_selection.h"
+#include "rhs_impedance_math.h"
 
 #include "rhxcontroller.h"
 #include "rhxregisters.h"
@@ -11,12 +14,14 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <chrono>
 
 struct RhsAcquisitionSession {
     std::unique_ptr<RHXController> controller;
     int target_stream;
     int target_port;
     int channel_count;
+    std::vector<int> streams;
     int samples_per_block;
     int blocks_per_read;
     int bytes_per_block;
@@ -289,7 +294,9 @@ bool prepare_controller(
     const char* serial,
     RhsScanResult* out,
     int& target_stream,
-    int& target_port
+    int& target_port,
+    int expected_port = -1,
+    int expected_stream = -1
 )
 {
     std::vector<std::string> serials = controller.listAvailableDeviceSerials();
@@ -332,10 +339,24 @@ bool prepare_controller(
     out->return_code = scan_code;
     out->pipe_read_error = controller.pipeReadError();
 
+    if (scan_code < 0 || out->pipe_read_error != 0) {
+        out->return_code = -104;
+        set_message(out, "chip scan failed or USB pipe reported an error");
+        return false;
+    }
+    for (size_t i = 0; i < chip_type.size() && i < RHS_SCAN_MAX_RESULTS; ++i) {
+        out->chip_type[i] = chip_type[i];
+        out->port_index[i] = port_index[i];
+        out->command_stream[i] = command_stream[i];
+        ++out->chip_count;
+    }
+
     target_stream = -1;
     target_port = -1;
     for (size_t i = 0; i < chip_type.size(); ++i) {
-        if (chip_type[i] == RHS2116Chip) {
+        if (chip_type[i] == RHS2116Chip &&
+            (expected_port < 0 || port_index[i] == expected_port) &&
+            (expected_stream < 0 || command_stream[i] == expected_stream)) {
             target_stream = command_stream[i];
             target_port = port_index[i];
             break;
@@ -343,7 +364,11 @@ bool prepare_controller(
     }
 
     if (target_stream < 0) {
-        set_message(out, "scan completed, but no RHS2116 chip was detected");
+        out->return_code = -5;
+        std::ostringstream message;
+        message << "scan completed, but no RHS2116 matched port=" << expected_port
+                << " stream=" << expected_stream;
+        set_message(out, message.str());
         return false;
     }
 
@@ -360,13 +385,20 @@ bool run_aux_command_list(RHXController& controller, const std::vector<unsigned 
     controller.setMaxTimeStep(command_length);
     controller.setContinuousRunMode(false);
     controller.run();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (controller.isRunning()) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            controller.setStimCmdMode(false);
+            controller.resetSequencers();
+            controller.setContinuousRunMode(false);
+            controller.setMaxTimeStep(0);
+            return false;
+        }
         std::this_thread::sleep_for(std::chrono::microseconds(100));
     }
 
     RHXDataBlock data_block(controller.getType(), controller.getNumEnabledDataStreams());
-    controller.readDataBlock(&data_block);
-    return true;
+    return controller.readDataBlock(&data_block) && controller.pipeReadError() == 0;
 }
 
 bool validate_stim_config(const RhsStimConfig* config, RhsScanResult* out)
@@ -377,6 +409,7 @@ bool validate_stim_config(const RhsStimConfig* config, RhsScanResult* out)
         return false;
     }
     if (config->channel < 0 || config->channel > 15 ||
+        config->channel_mask < 0 || config->channel_mask > 0xffff ||
         config->trigger < 0 || config->trigger > 7 ||
         config->pulses < 1 || config->pulses > 20 ||
         config->magnitude_steps < 1 || config->magnitude_steps > 255 ||
@@ -388,6 +421,12 @@ bool validate_stim_config(const RhsStimConfig* config, RhsScanResult* out)
         set_message(out, "stimulation config outside allowed bridge limits");
         return false;
     }
+    if (config->channel_mask != 0 &&
+        (config->channel_mask & (1 << config->channel)) == 0) {
+        out->return_code = -10;
+        set_message(out, "stimulation channel mask must include primary channel");
+        return false;
+    }
 
     const int end_stim = 2 * config->phase_steps + config->interphase_steps;
     const int total_steps = config->period_steps * config->pulses + 256;
@@ -397,6 +436,16 @@ bool validate_stim_config(const RhsStimConfig* config, RhsScanResult* out)
         return false;
     }
     return true;
+}
+
+int effective_stim_channel_mask(const RhsStimConfig& config)
+{
+    return config.channel_mask != 0 ? config.channel_mask : (1 << config.channel);
+}
+
+int acquisition_stim_mask(const RhsAcquisitionSession& session, int stream)
+{
+    return routed_rhs_stim_mask(session.stim_config, stream, session.target_stream);
 }
 
 void fill_stim_result(
@@ -433,6 +482,7 @@ bool stop_stim_output(RhsStimSession* session, bool& board_was_reset)
         session->controller->setManualStimTrigger(trigger, false);
     }
     session->controller->setStimCmdMode(false);
+    disable_rhs_stim_stream(*session->controller, session->target_stream);
     session->controller->resetSequencers();
     session->controller->setContinuousRunMode(false);
     session->controller->setMaxTimeStep(0);
@@ -459,12 +509,31 @@ int rhs_stim_open(
     RhsScanResult* out
 )
 {
+    return rhs_stim_open_target(bitfile_path, serial, -1, -1, out_session, out);
+}
+
+int rhs_stim_open_target(
+    const char* bitfile_path,
+    const char* serial,
+    int expected_port,
+    int expected_stream,
+    RhsStimSession** out_session,
+    RhsScanResult* out
+)
+{
     reset_result(out);
     if (out_session) *out_session = nullptr;
     if (!out_session || !out) return -101;
     if (!bitfile_path || bitfile_path[0] == '\0') {
         out->return_code = -103;
         set_message(out, "missing bitfile path");
+        return out->return_code;
+    }
+    if ((expected_port >= 0 || expected_stream >= 0) &&
+        (expected_port < 0 || expected_port > 3 ||
+         expected_stream < 0 || expected_stream > 7)) {
+        out->return_code = -104;
+        set_message(out, "targeted stimulation requires a valid port (0..3) and stream (0..7)");
         return out->return_code;
     }
 
@@ -483,7 +552,9 @@ int rhs_stim_open(
                 serial,
                 out,
                 session->target_stream,
-                session->target_port)) {
+                session->target_port,
+                expected_port,
+                expected_stream)) {
             return out->return_code;
         }
 
@@ -526,6 +597,10 @@ int rhs_stim_start(
     reset_result(out);
     if (!session || !out) return -101;
     if (!validate_stim_config(config, out)) return out->return_code;
+    if (effective_stim_channel_mask(*config) != (1 << config->channel)) {
+        fill_stim_result(session, out, -10, "direct stimulation session supports one channel; use acquisition session for channel masks");
+        return out->return_code;
+    }
     if (session->running) {
         fill_stim_result(session, out, -12, "a stimulation command is already active");
         return out->return_code;
@@ -537,6 +612,8 @@ int rhs_stim_start(
 
     try {
         StimStepSize step = static_cast<StimStepSize>(config->stim_step_size);
+        session->controller->setStimCmdMode(false);
+        session->controller->enableAuxCommandsOnOneStream(session->target_stream);
         RHXRegisters regs(session->controller->getType(), session->controller->getSampleRate(), step);
         std::vector<unsigned int> command_list;
 
@@ -559,74 +636,14 @@ int rhs_stim_start(
             return out->return_code;
         }
 
-        const int phase1_end = config->phase_steps;
-        const int phase2_start = config->phase_steps + config->interphase_steps;
-        const int end_stim = phase2_start + config->phase_steps;
         const int total_steps = config->period_steps * config->pulses + 256;
-        const int NEVER = 65535;
-
-        session->controller->configureStimTrigger(
-            session->target_stream,
-            config->channel,
-            config->trigger,
-            false,
-            true,
-            false
-        );
-        session->controller->configureStimPulses(
-            session->target_stream,
-            config->channel,
-            config->pulses,
-            Biphasic,
-            true
-        );
-        session->controller->programStimReg(
-            session->target_stream,
-            config->channel,
-            AbstractRHXController::EventAmpSettleOn,
-            NEVER
-        );
-        session->controller->programStimReg(
-            session->target_stream,
-            config->channel,
-            AbstractRHXController::EventStartStim,
-            0
-        );
-        session->controller->programStimReg(
-            session->target_stream,
-            config->channel,
-            AbstractRHXController::EventStimPhase2,
-            phase1_end
-        );
-        session->controller->programStimReg(
-            session->target_stream,
-            config->channel,
-            AbstractRHXController::EventStimPhase3,
-            NEVER
-        );
-        session->controller->programStimReg(
-            session->target_stream,
-            config->channel,
-            AbstractRHXController::EventEndStim,
-            end_stim
-        );
-        session->controller->programStimReg(
-            session->target_stream,
-            config->channel,
-            AbstractRHXController::EventRepeatStim,
-            config->pulses > 1 ? config->period_steps : NEVER
-        );
-        session->controller->programStimReg(
-            session->target_stream,
-            config->channel,
-            AbstractRHXController::EventEnd,
-            total_steps - 1
-        );
+        program_rhs_stim_sequence(*session->controller, session->target_stream, config->channel, *config);
 
         session->active_trigger = config->trigger;
         session->running = true;
         session->controller->setMaxTimeStep(total_steps);
         session->controller->setContinuousRunMode(false);
+        enable_rhs_stim_sequence(*session->controller, session->target_stream, *config);
         session->controller->setStimCmdMode(true);
         session->controller->run();
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -672,6 +689,7 @@ int rhs_stim_poll(RhsStimSession* session, RhsScanResult* out)
 
         session->controller->setManualStimTrigger(session->active_trigger, false);
         session->controller->setStimCmdMode(false);
+        disable_rhs_stim_stream(*session->controller, session->target_stream);
         session->controller->resetSequencers();
         session->running = false;
         session->active_trigger = -1;
@@ -749,6 +767,7 @@ int rhs_run_bounded_stim(
     }
 
     if (config->channel < 0 || config->channel > 15 ||
+        config->channel_mask < 0 || config->channel_mask > 0xffff ||
         config->trigger < 0 || config->trigger > 7 ||
         config->pulses < 1 || config->pulses > 20 ||
         config->magnitude_steps < 1 || config->magnitude_steps > 255 ||
@@ -759,12 +778,15 @@ int rhs_run_bounded_stim(
         set_message(out, "stimulation config outside allowed PoC limits");
         return out->return_code;
     }
+    if (effective_stim_channel_mask(*config) != (1 << config->channel)) {
+        out->return_code = -10;
+        set_message(out, "bounded stimulation supports one channel only");
+        return out->return_code;
+    }
 
-    const int phase1_end = config->phase_steps;
     const int phase2_start = config->phase_steps + config->interphase_steps;
     const int end_stim = phase2_start + config->phase_steps;
     const int total_steps = config->period_steps * config->pulses + 256;
-    const int NEVER = 65535;
 
     if (end_stim >= config->period_steps || total_steps > 65534) {
         out->return_code = -11;
@@ -784,6 +806,7 @@ int rhs_run_bounded_stim(
             controller.enableDataStream(stream, false);
         }
         controller.enableDataStream(target_stream, true);
+        controller.enableAuxCommandsOnOneStream(target_stream);
 
         StimStepSize step = static_cast<StimStepSize>(config->stim_step_size);
         RHXRegisters regs(controller.getType(), controller.getSampleRate(), step);
@@ -810,19 +833,11 @@ int rhs_run_bounded_stim(
             return out->return_code;
         }
 
-        controller.configureStimTrigger(target_stream, config->channel, config->trigger, true, true, false);
-        controller.configureStimPulses(target_stream, config->channel, config->pulses, Biphasic, true);
-        controller.programStimReg(target_stream, config->channel, AbstractRHXController::EventAmpSettleOn, NEVER);
-        controller.programStimReg(target_stream, config->channel, AbstractRHXController::EventStartStim, 0);
-        controller.programStimReg(target_stream, config->channel, AbstractRHXController::EventStimPhase2, phase1_end);
-        controller.programStimReg(target_stream, config->channel, AbstractRHXController::EventStimPhase3, NEVER);
-        controller.programStimReg(target_stream, config->channel, AbstractRHXController::EventEndStim, end_stim);
-        controller.programStimReg(target_stream, config->channel, AbstractRHXController::EventRepeatStim,
-                                  config->pulses > 1 ? config->period_steps : NEVER);
-        controller.programStimReg(target_stream, config->channel, AbstractRHXController::EventEnd, total_steps - 1);
+        program_rhs_stim_sequence(controller, target_stream, config->channel, *config);
 
         controller.setMaxTimeStep(total_steps);
         controller.setContinuousRunMode(false);
+        enable_rhs_stim_sequence(controller, target_stream, *config);
         controller.setStimCmdMode(true);
         controller.run();
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -835,6 +850,7 @@ int rhs_run_bounded_stim(
         }
 
         controller.setStimCmdMode(false);
+        disable_rhs_stim_stream(controller, target_stream);
         controller.resetSequencers();
 
         out->chip_count = 1;
@@ -872,6 +888,21 @@ int rhs_acquisition_open(
     RhsAcquisitionInfo* out_info
 )
 {
+    return rhs_acquisition_open_channels(bitfile_path, serial, blocks_per_read, 16, out_session, out_info);
+}
+
+int rhs_acquisition_streams(RhsAcquisitionSession* session, int* streams, size_t capacity)
+{
+    if (!session || !streams || capacity < session->streams.size()) return -111;
+    std::copy(session->streams.begin(), session->streams.end(), streams);
+    return static_cast<int>(session->streams.size());
+}
+
+int rhs_acquisition_open_channels(
+    const char* bitfile_path, const char* serial, int blocks_per_read,
+    int channel_count, RhsAcquisitionSession** out_session, RhsAcquisitionInfo* out_info
+)
+{
     reset_acquisition_info(out_info);
     if (out_session) *out_session = nullptr;
     if (!out_session || !out_info) return -101;
@@ -885,17 +916,22 @@ int rhs_acquisition_open(
         set_acquisition_message(out_info, "blocks_per_read must be 1..32");
         return out_info->return_code;
     }
+    if (channel_count != 16 && channel_count != 64) {
+        out_info->return_code = -103;
+        set_acquisition_message(out_info, "acquisition channel count must be 16 or 64");
+        return -103;
+    }
 
     try {
         std::unique_ptr<RhsAcquisitionSession> session(new RhsAcquisitionSession());
         session->controller.reset(new RHXController(ControllerStimRecord, SampleRate30000Hz, true));
         session->target_stream = -1;
         session->target_port = -1;
-        session->channel_count = 16;
+        session->channel_count = channel_count;
         session->samples_per_block = RHXDataBlock::samplesPerDataBlock(ControllerStimRecord);
         session->blocks_per_read = blocks_per_read;
         session->bytes_per_block = static_cast<int>(
-            BytesPerWord * RHXDataBlock::dataBlockSizeInWords(ControllerStimRecord, 1)
+            BytesPerWord * RHXDataBlock::dataBlockSizeInWords(ControllerStimRecord, channel_count / 16)
         );
         session->running = false;
         session->stim_configured = false;
@@ -925,12 +961,27 @@ int rhs_acquisition_open(
             return out_info->return_code;
         }
 
-        if (session->controller->getNumEnabledDataStreams() != 1) {
+        std::string selection_error;
+        if (!select_rhs_acquisition_streams(scan_result, channel_count, session->streams, selection_error)) {
             out_info->return_code = -104;
-            set_acquisition_message(out_info, "Iteration 1 requires exactly one enabled RHS2116 stream");
+            set_acquisition_message(out_info, selection_error);
+            return -104;
+        }
+        session->target_stream = session->streams.front();
+        session->target_port = session->target_stream / 2;
+        for (int stream = 0; stream < session->controller->maxNumDataStreams(); ++stream) {
+            session->controller->enableDataStream(stream, false);
+            disable_rhs_stim_stream(*session->controller, stream);
+        }
+        for (int stream : session->streams) session->controller->enableDataStream(stream, true);
+
+        if (session->controller->getNumEnabledDataStreams() != channel_count / 16) {
+            out_info->return_code = -104;
+            set_acquisition_message(out_info, "enabled RHS2116 stream count does not match requested channels");
             return out_info->return_code;
         }
 
+        session->controller->enableAuxCommandsOnAllStreams();
         RHXRegisters registers(session->controller->getType(), session->controller->getSampleRate());
         std::vector<unsigned int> command_list;
         int command_length = registers.createCommandListRHSRegisterConfig(command_list, true);
@@ -1026,7 +1077,35 @@ int rhs_acquisition_configure_stim(
         return out_result->return_code;
     }
 
+    session->stim_configured = false;
+    session->stim_active = false;
+
+    bool routed = false;
+    for (int stream = 0; stream < RHS_SCAN_MAX_RESULTS; ++stream) {
+        const int mask = config->stream_masks[stream];
+        if (mask < 0 || mask > 0xffff || (mask != 0 &&
+            std::find(session->streams.begin(), session->streams.end(), stream) == session->streams.end())) {
+            fill_acquisition_stim_result(session, out_result, -103, "stimulation mask addresses an absent stream");
+            return -103;
+        }
+        routed = routed || mask != 0;
+    }
+    if (session->streams.size() > 1 && !routed) {
+        fill_acquisition_stim_result(session, out_result, -103, "multi-stream stimulation requires explicit stream masks");
+        return -103;
+    }
+    session->stim_config = *config;
+
     try {
+        session->controller->setStimCmdMode(false);
+        for (int trigger = 0; trigger < 8; ++trigger) {
+            session->controller->setManualStimTrigger(trigger, false);
+        }
+        for (int stream : session->streams) {
+        disable_rhs_stim_stream(*session->controller, stream);
+        const int channel_mask = acquisition_stim_mask(*session, stream);
+        if (channel_mask == 0) continue;
+        session->controller->enableAuxCommandsOnOneStream(stream);
         StimStepSize step = static_cast<StimStepSize>(config->stim_step_size);
         RHXRegisters registers(
             session->controller->getType(),
@@ -1046,25 +1125,28 @@ int rhs_acquisition_configure_stim(
             return out_result->return_code;
         }
 
-        command_length = registers.createCommandListSetStimMagnitudes(
-            command_list,
-            config->channel,
-            config->magnitude_steps,
-            0,
-            config->magnitude_steps,
-            0
-        );
-        if (command_length <= 0 || !run_aux_command_list(*session->controller, command_list)) {
-            fill_acquisition_stim_result(
-                session,
-                out_result,
-                -122,
-                "failed to program RHS stimulation magnitudes before acquisition"
+        for (int channel = 0; channel < 16; ++channel) {
+            if ((channel_mask & (1 << channel)) == 0) continue;
+            command_length = registers.createCommandListSetStimMagnitudes(
+                command_list,
+                channel,
+                config->magnitude_steps,
+                0,
+                config->magnitude_steps,
+                0
             );
-            return out_result->return_code;
+            if (command_length <= 0 || !run_aux_command_list(*session->controller, command_list)) {
+                fill_acquisition_stim_result(
+                    session,
+                    out_result,
+                    -122,
+                    "failed to program RHS stimulation magnitudes before acquisition"
+                );
+                return out_result->return_code;
+            }
         }
 
-        command_length = registers.createCommandListRHSRegisterConfig(command_list, true);
+        command_length = registers.createCommandListRHSRegisterConfig(command_list, false);
         if (command_length <= 0) {
             fill_acquisition_stim_result(
                 session,
@@ -1081,69 +1163,12 @@ int rhs_acquisition_configure_stim(
             command_length - 1
         );
 
-        const int phase1_end = config->phase_steps;
-        const int phase2_start = config->phase_steps + config->interphase_steps;
-        const int end_stim = phase2_start + config->phase_steps;
-        const int total_steps = config->period_steps * config->pulses + 256;
-        const int NEVER = 65535;
-
-        session->controller->configureStimTrigger(
-            session->target_stream,
-            config->channel,
-            config->trigger,
-            true,
-            true,
-            false
-        );
-        session->controller->configureStimPulses(
-            session->target_stream,
-            config->channel,
-            config->pulses,
-            Biphasic,
-            true
-        );
-        session->controller->programStimReg(
-            session->target_stream,
-            config->channel,
-            AbstractRHXController::EventAmpSettleOn,
-            NEVER
-        );
-        session->controller->programStimReg(
-            session->target_stream,
-            config->channel,
-            AbstractRHXController::EventStartStim,
-            0
-        );
-        session->controller->programStimReg(
-            session->target_stream,
-            config->channel,
-            AbstractRHXController::EventStimPhase2,
-            phase1_end
-        );
-        session->controller->programStimReg(
-            session->target_stream,
-            config->channel,
-            AbstractRHXController::EventStimPhase3,
-            NEVER
-        );
-        session->controller->programStimReg(
-            session->target_stream,
-            config->channel,
-            AbstractRHXController::EventEndStim,
-            end_stim
-        );
-        session->controller->programStimReg(
-            session->target_stream,
-            config->channel,
-            AbstractRHXController::EventRepeatStim,
-            config->pulses > 1 ? config->period_steps : NEVER
-        );
-        session->controller->programStimReg(
-            session->target_stream,
-            config->channel,
-            AbstractRHXController::EventEnd,
-            total_steps - 1
-        );
+        for (int channel = 0; channel < 16; ++channel) {
+            if ((channel_mask & (1 << channel)) == 0) continue;
+            program_rhs_stim_sequence(*session->controller, stream, channel, *config);
+        }
+        }
+        session->controller->enableAuxCommandsOnAllStreams();
 
         for (int trigger = 0; trigger < 8; ++trigger) {
             session->controller->setManualStimTrigger(trigger, false);
@@ -1155,8 +1180,7 @@ int rhs_acquisition_configure_stim(
         session->stim_active = false;
 
         std::ostringstream message;
-        message << "stimulation preset configured for acquisition on channel "
-                << config->channel
+        message << "stimulation preset configured for " << session->streams.size() << " acquisition streams"
                 << ", pulses=" << config->pulses
                 << "; output remains disabled until trigger";
         fill_acquisition_stim_result(session, out_result, 1, message.str());
@@ -1228,26 +1252,11 @@ int rhs_acquisition_trigger_stim(
     }
 
     try {
-        session->controller->configureStimTrigger(
-            session->target_stream,
-            session->stim_config.channel,
-            session->stim_config.trigger,
-            true,
-            true,
-            false
-        );
+        enable_rhs_stim_routes(*session->controller, session->streams, session->target_stream, session->stim_config);
         session->controller->setStimCmdMode(true);
         session->controller->setManualStimTrigger(session->stim_config.trigger, true);
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
         session->controller->setManualStimTrigger(session->stim_config.trigger, false);
-        session->controller->configureStimTrigger(
-            session->target_stream,
-            session->stim_config.channel,
-            session->stim_config.trigger,
-            false,
-            true,
-            false
-        );
         session->stim_active = true;
         fill_acquisition_stim_result(
             session,
@@ -1257,6 +1266,10 @@ int rhs_acquisition_trigger_stim(
         );
         return 1;
     } catch (const std::exception& e) {
+        try {
+            session->controller->setManualStimTrigger(session->stim_config.trigger, false);
+            session->controller->setStimCmdMode(false);
+        } catch (...) {}
         session->stim_active = false;
         fill_acquisition_stim_result(
             session,
@@ -1266,6 +1279,10 @@ int rhs_acquisition_trigger_stim(
         );
         return out_result->return_code;
     } catch (...) {
+        try {
+            session->controller->setManualStimTrigger(session->stim_config.trigger, false);
+            session->controller->setStimCmdMode(false);
+        } catch (...) {}
         session->stim_active = false;
         fill_acquisition_stim_result(session, out_result, -199, "unknown exception");
         return out_result->return_code;
@@ -1281,19 +1298,12 @@ int rhs_acquisition_cancel_stim(
     if (!session || !out_result) return -101;
     try {
         const bool was_active = session->stim_active;
+        session->controller->setStimCmdMode(false);
+        session->controller->resetSequencers();
         for (int trigger = 0; trigger < 8; ++trigger) {
             session->controller->setManualStimTrigger(trigger, false);
         }
-        if (session->stim_configured) {
-            session->controller->configureStimTrigger(
-                session->target_stream,
-                session->stim_config.channel,
-                session->stim_config.trigger,
-                false,
-                true,
-                false
-            );
-        }
+        for (int stream : session->streams) disable_rhs_stim_stream(*session->controller, stream);
         session->controller->setStimCmdMode(false);
         session->controller->resetSequencers();
         session->stim_active = false;
@@ -1328,11 +1338,11 @@ int rhs_acquisition_read(
     size_t amplifier_capacity,
     uint16_t* ttl_in,
     size_t ttl_capacity,
-    uint16_t* stim_on,
+    uint64_t* stim_on,
     size_t stim_on_capacity,
-    uint16_t* stim_polarity,
+    uint64_t* stim_polarity,
     size_t stim_polarity_capacity,
-    uint16_t* compliance_limit,
+    uint64_t* compliance_limit,
     size_t compliance_capacity,
     uint16_t* dc_amplifier_samples,
     size_t dc_amplifier_capacity,
@@ -1404,7 +1414,7 @@ int rhs_acquisition_read(
             return out_result->return_code;
         }
 
-        RHXDataBlock data_block(ControllerStimRecord, 1);
+        RHXDataBlock data_block(ControllerStimRecord, static_cast<int>(session->streams.size()));
         size_t sample_offset = 0;
         size_t amplifier_offset = 0;
         size_t dc_amplifier_offset = 0;
@@ -1413,27 +1423,29 @@ int rhs_acquisition_read(
             for (int sample = 0; sample < session->samples_per_block; ++sample) {
                 timestamps[sample_offset] = data_block.timeStamp(sample);
                 uint16_t ttl_mask = 0;
-                uint16_t stim_on_mask = 0;
-                uint16_t stim_polarity_mask = 0;
-                uint16_t compliance_mask = 0;
+                uint64_t stim_on_mask = 0;
+                uint64_t stim_polarity_mask = 0;
+                uint64_t compliance_mask = 0;
+                for (int bit = 0; bit < 16; ++bit) {
+                    if (data_block.ttlIn(bit, sample)) ttl_mask |= static_cast<uint16_t>(1U << bit);
+                }
                 for (int channel = 0; channel < session->channel_count; ++channel) {
-                    if (data_block.ttlIn(channel, sample)) {
-                        ttl_mask |= static_cast<uint16_t>(1U << channel);
+                    const int stream = channel / 16;
+                    const int chip_channel = channel % 16;
+                    if (data_block.stimOn(stream, chip_channel, sample)) {
+                        stim_on_mask |= uint64_t(1) << channel;
                     }
-                    if (data_block.stimOn(0, channel, sample)) {
-                        stim_on_mask |= static_cast<uint16_t>(1U << channel);
+                    if (data_block.stimPol(stream, chip_channel, sample)) {
+                        stim_polarity_mask |= uint64_t(1) << channel;
                     }
-                    if (data_block.stimPol(0, channel, sample)) {
-                        stim_polarity_mask |= static_cast<uint16_t>(1U << channel);
-                    }
-                    if (data_block.complianceLimit(0, channel, sample)) {
-                        compliance_mask |= static_cast<uint16_t>(1U << channel);
+                    if (data_block.complianceLimit(stream, chip_channel, sample)) {
+                        compliance_mask |= uint64_t(1) << channel;
                     }
                     amplifier_samples[amplifier_offset++] = static_cast<uint16_t>(
-                        data_block.amplifierData(0, channel, sample)
+                        data_block.amplifierData(stream, chip_channel, sample)
                     );
                     dc_amplifier_samples[dc_amplifier_offset++] = static_cast<uint16_t>(
-                        data_block.dcAmplifierData(0, channel, sample)
+                        data_block.dcAmplifierData(stream, chip_channel, sample)
                     );
                 }
                 ttl_in[sample_offset] = ttl_mask;
@@ -1467,6 +1479,7 @@ int rhs_acquisition_stop(RhsAcquisitionSession* session, RhsAcquisitionInfo* out
     reset_acquisition_info(out_info);
     if (!session || !out_info) return -101;
     try {
+        session->controller->setStimCmdMode(false);
         for (int trigger = 0; trigger < 8; ++trigger) {
             session->controller->setManualStimTrigger(trigger, false);
         }
@@ -1507,5 +1520,171 @@ void rhs_acquisition_close(RhsAcquisitionSession* session)
         rhs_acquisition_stop(session, &ignored);
     } catch (...) {
     }
+    delete session;
+}
+
+struct RhsImpedanceSession {
+    RhsAcquisitionSession* acquisition = nullptr;
+    rhs_impedance::Plan plan;
+    int active_stream = -1;
+    ~RhsImpedanceSession() { rhs_acquisition_close(acquisition); }
+};
+
+namespace {
+void wait_impedance_run(RHXController& controller, int samples,
+    RhsImpedanceCancelled cancelled, void* context)
+{
+    const auto deadline = std::chrono::steady_clock::now() +
+        std::chrono::milliseconds(2000 + samples / 30);
+    while (controller.isRunning()) {
+        if (cancelled && cancelled(context)) throw std::runtime_error("impedance measurement cancelled");
+        if (std::chrono::steady_clock::now() >= deadline) throw std::runtime_error("impedance finite-run timeout");
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
+
+void restore_impedance(RhsImpedanceSession& session)
+{
+    if (session.active_stream < 0) return;
+    auto& controller = *session.acquisition->controller;
+    controller.setContinuousRunMode(false);
+    controller.setMaxTimeStep(0);
+    try { wait_impedance_run(controller, 0, nullptr, nullptr); }
+    catch (...) { controller.resetBoard(); session.active_stream = -1; throw; }
+    controller.flush();
+    controller.enableAuxCommandsOnOneStream(session.active_stream);
+    RHXRegisters registers(ControllerStimRecord, 30000.0);
+    registers.enableZcheck(false);
+    registers.setZcheckDacPower(false);
+    std::vector<unsigned int> commands;
+    int length = registers.createCommandListZcheckDac(commands, 0, 0);
+    controller.uploadCommandList(commands, RHXController::AuxCmd1);
+    controller.selectAuxCommandLength(RHXController::AuxCmd1, 0, length - 1);
+    length = registers.createCommandListRHSRegisterConfig(commands, false);
+    controller.uploadCommandList(commands, RHXController::AuxCmd3);
+    controller.selectAuxCommandLength(RHXController::AuxCmd3, 0, length - 1);
+    controller.setMaxTimeStep(256);
+    controller.run();
+    try { wait_impedance_run(controller, 256, nullptr, nullptr); }
+    catch (...) { controller.resetBoard(); session.active_stream = -1; throw; }
+    controller.flush();
+    controller.setMaxTimeStep(0);
+    session.active_stream = -1;
+}
+}
+
+int rhs_impedance_open(const char* bitfile, const char* serial, int channels,
+    double frequency, RhsImpedanceSession** out, RhsAcquisitionInfo* info)
+{
+    if (out) *out = nullptr;
+    reset_acquisition_info(info);
+    if (!out || !info) return -101;
+    try {
+        std::unique_ptr<RhsImpedanceSession> session(new RhsImpedanceSession());
+        session->plan = rhs_impedance::plan(frequency);
+        const int code = rhs_acquisition_open_channels(bitfile, serial, 1, channels, &session->acquisition, info);
+        if (code < 0) return code;
+        for (int dac = 0; dac < 8; ++dac) session->acquisition->controller->enableDac(dac, false);
+        *out = session.release();
+        return 1;
+    } catch (const std::exception& error) {
+        set_acquisition_message(info, error.what());
+        info->return_code = -198;
+        return -198;
+    } catch (...) { set_acquisition_message(info, "unknown impedance open error"); return -199; }
+}
+
+int rhs_impedance_measure(RhsImpedanceSession* session, int index,
+    RhsImpedanceCancelled cancelled, void* context, RhsImpedanceResult* result)
+{
+    if (!result) return -101;
+    *result = RhsImpedanceResult{};
+    result->return_code = -101;
+    if (!session || index < 0 || index >= session->acquisition->channel_count) return -101;
+    try {
+        auto& acquisition = *session->acquisition;
+        auto& controller = *acquisition.controller;
+        const int stream = index / 16, channel = index % 16;
+        const auto& p = session->plan;
+        session->active_stream = acquisition.streams[stream];
+        controller.enableAuxCommandsOnOneStream(session->active_stream);
+        controller.setStimCmdMode(false);
+        controller.setContinuousRunMode(false);
+        RHXRegisters registers(ControllerStimRecord, 30000.0);
+        registers.enableDsp(false);
+        registers.setLowerBandwidth(0.1, 0);
+        const double upper = registers.setUpperBandwidth(7500.0);
+        registers.enableZcheck(true);
+        registers.setZcheckChannel(channel);
+        std::array<rhs_impedance::Polar, 3> voltages;
+        const RHXRegisters::ZcheckCs scales[] = {
+            RHXRegisters::ZcheckCs100fF, RHXRegisters::ZcheckCs1pF, RHXRegisters::ZcheckCs10pF};
+        for (int range = 0; range < 3; ++range) {
+            if (cancelled && cancelled(context)) throw std::runtime_error("impedance measurement cancelled");
+            std::vector<unsigned int> commands;
+            int length = registers.createCommandListZcheckDac(commands, p.frequency, 128.0);
+            controller.uploadCommandList(commands, RHXController::AuxCmd1);
+            controller.selectAuxCommandLength(RHXController::AuxCmd1, 0, length - 1);
+            registers.setZcheckScale(scales[range]);
+            length = registers.createCommandListRHSRegisterConfig(commands, false);
+            controller.uploadCommandList(commands, RHXController::AuxCmd3);
+            controller.selectAuxCommandLength(RHXController::AuxCmd3, 0, length - 1);
+            controller.setMaxTimeStep(p.blocks * 128);
+            controller.run();
+            wait_impedance_run(controller, p.blocks * 128, cancelled, context);
+            std::vector<uint8_t> raw(static_cast<size_t>(acquisition.bytes_per_block) * p.blocks);
+            const long bytes = controller.readDataBlocksRaw(p.blocks, raw.data());
+            if (bytes != static_cast<long>(raw.size()) || controller.pipeReadError() != 0)
+                throw std::runtime_error("impedance USB batch incomplete");
+            RHXDataBlock block(ControllerStimRecord, static_cast<int>(acquisition.streams.size()));
+            std::vector<double> waveform;
+            waveform.reserve(p.blocks * 128);
+            uint32_t previous = 0;
+            bool first = true;
+            for (int b = 0; b < p.blocks; ++b) {
+                for (int t = 0; t < 128; ++t) {
+                    const int offset = b * acquisition.bytes_per_block + t * acquisition.bytes_per_block / 128;
+                    if (!RHXDataBlock::checkUsbHeader(raw.data(), offset, ControllerStimRecord))
+                        throw std::runtime_error("invalid impedance USB frame header");
+                }
+                block.fillFromUsbBuffer(raw.data(), b);
+                for (int t = 0; t < 128; ++t) {
+                    const uint32_t timestamp = block.timeStamp(t);
+                    if (!first && timestamp != uint32_t(previous + 1)) throw std::runtime_error("impedance timestamp discontinuity");
+                    first = false; previous = timestamp;
+                    if (block.stimOn(stream, channel, t)) throw std::runtime_error("unexpected stimulation during impedance test");
+                    waveform.push_back(0.195 * (block.amplifierData(stream, channel, t) - 32768));
+                }
+            }
+            voltages[range] = rhs_impedance::correlate(waveform, p);
+        }
+        const auto measured = rhs_impedance::estimate(voltages, p, upper);
+        result->stream = session->active_stream;
+        result->channel = channel;
+        result->frequency_hz = p.frequency;
+        result->magnitude_ohms = measured.magnitude;
+        result->phase_degrees = measured.phase;
+        result->quality = measured.quality;
+        restore_impedance(*session);
+        result->return_code = 1;
+        return 1;
+    } catch (const std::exception& error) {
+        std::string message = error.what();
+        try { restore_impedance(*session); }
+        catch (const std::exception& cleanup) { message += std::string("; cleanup failed: ") + cleanup.what(); }
+        std::copy_n(message.data(), std::min(message.size(), sizeof(result->message) - 1), result->message);
+        result->return_code = message == "impedance measurement cancelled" ? -2 : -198;
+        return result->return_code;
+    } catch (...) {
+        try { restore_impedance(*session); } catch (...) {}
+        result->return_code = -199;
+        return -199;
+    }
+}
+
+void rhs_impedance_close(RhsImpedanceSession* session)
+{
+    if (!session) return;
+    try { restore_impedance(*session); } catch (...) {}
     delete session;
 }

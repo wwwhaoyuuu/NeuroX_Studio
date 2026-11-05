@@ -1,7 +1,9 @@
+mod functional_check;
+
 use rhs_core::{SampleBlock, SampleFlags};
 use rhs_device::{
-    AcquisitionConfig, AcquisitionHandle, AcquisitionWorkerConfig, RhsDevice, StimConfig,
-    StimHardwareSession, StimPoll, StimStepSize, WorkerStatus,
+    AcquisitionConfig, AcquisitionHandle, AcquisitionWorkerConfig, RhsDevice, ScanReport,
+    StimConfig, StimHardwareSession, StimPoll, StimStepSize, WorkerStatus,
 };
 use rhs_nodes::{
     ArtifactBlanker, BandPassProcessor, BlankingConfig, BlankingReplacement, MeasuredProcessor,
@@ -17,6 +19,7 @@ use rhs_stim::{
     StimOutcome, StimParameters, StimPreset, StimSafetyPolicy, StimService, StimServiceState,
 };
 use rhs_storage::{sha256_file, FileReplaySource, RawRecorderSink};
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::mpsc::{RecvTimeoutError, TryRecvError};
 use std::time::{Duration, Instant};
@@ -52,19 +55,26 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             run_stim_service_check()?;
         }
+        "stim64-functional-check" => {
+            let (device, rest) = parse_common(args)?;
+            functional_check::run(device, rest)?;
+        }
         "stim-session-check" => {
             let (device, rest) = parse_common(args)?;
-            if !rest.is_empty() {
-                return Err("stim-session-check only accepts --bitfile and --serial".into());
-            }
-            run_stim_session_check(device)?;
+            run_stim_session_check(device, parse_stim_session_target(&rest)?)?;
         }
-        "sync-session-check" => {
+        "sync-session-check" | "sync64-session-check" => {
             let (device, rest) = parse_common(args)?;
-            if !rest.is_empty() {
-                return Err("sync-session-check only accepts --bitfile and --serial".into());
-            }
-            run_sync_session_check(device)?;
+            let channel_mask = parse_sync_channel_mask(rest)?;
+            run_sync_session_check(
+                device,
+                channel_mask,
+                if command == "sync64-session-check" {
+                    64
+                } else {
+                    16
+                },
+            )?;
         }
         "acquire" => {
             let (device, args) = parse_common(args)?;
@@ -101,6 +111,240 @@ struct AcquireOptions {
     seconds: u64,
     blocks_per_read: u8,
     queue_capacity: usize,
+    channel_count: usize,
+}
+
+#[derive(Debug, Clone)]
+struct ChannelSignalStats {
+    count: u64,
+    minimum: u16,
+    maximum: u16,
+    mean: f64,
+    m2: f64,
+    exact_rail_samples: u64,
+    near_rail_samples: u64,
+    step_count: u64,
+    large_steps: u64,
+    upward_center_crossings: u64,
+    maximum_step: u16,
+    previous: Option<u16>,
+    common_sum: f64,
+    common_sum_sq: f64,
+    sample_common_sum: f64,
+}
+
+impl Default for ChannelSignalStats {
+    fn default() -> Self {
+        Self {
+            count: 0,
+            minimum: u16::MAX,
+            maximum: u16::MIN,
+            mean: 0.0,
+            m2: 0.0,
+            exact_rail_samples: 0,
+            near_rail_samples: 0,
+            step_count: 0,
+            large_steps: 0,
+            upward_center_crossings: 0,
+            maximum_step: 0,
+            previous: None,
+            common_sum: 0.0,
+            common_sum_sq: 0.0,
+            sample_common_sum: 0.0,
+        }
+    }
+}
+
+impl ChannelSignalStats {
+    const NEAR_RAIL_CODES: u16 = 512;
+    const LARGE_STEP_CODES: u16 = 8_192;
+
+    fn observe(&mut self, sample: u16, common_mode: f64) {
+        self.count += 1;
+        self.minimum = self.minimum.min(sample);
+        self.maximum = self.maximum.max(sample);
+
+        let value = f64::from(sample);
+        let delta = value - self.mean;
+        self.mean += delta / self.count as f64;
+        self.m2 += delta * (value - self.mean);
+
+        if sample == u16::MIN || sample == u16::MAX {
+            self.exact_rail_samples += 1;
+        }
+        if sample <= Self::NEAR_RAIL_CODES || sample >= u16::MAX - Self::NEAR_RAIL_CODES {
+            self.near_rail_samples += 1;
+        }
+
+        if let Some(previous) = self.previous {
+            let step = sample.abs_diff(previous);
+            self.step_count += 1;
+            self.maximum_step = self.maximum_step.max(step);
+            if step >= Self::LARGE_STEP_CODES {
+                self.large_steps += 1;
+            }
+            if previous < 32_768 && sample >= 32_768 {
+                self.upward_center_crossings += 1;
+            }
+        }
+        self.previous = Some(sample);
+
+        self.common_sum += common_mode;
+        self.common_sum_sq += common_mode * common_mode;
+        self.sample_common_sum += value * common_mode;
+    }
+
+    fn standard_deviation(&self) -> f64 {
+        if self.count < 2 {
+            return 0.0;
+        }
+        (self.m2 / (self.count - 1) as f64).sqrt()
+    }
+
+    fn rail_percent(&self) -> f64 {
+        percent(self.near_rail_samples, self.count)
+    }
+
+    fn exact_rail_percent(&self) -> f64 {
+        percent(self.exact_rail_samples, self.count)
+    }
+
+    fn large_step_percent(&self) -> f64 {
+        percent(self.large_steps, self.step_count)
+    }
+
+    fn common_mode_correlation(&self) -> f64 {
+        if self.count < 2 {
+            return 0.0;
+        }
+        let count = self.count as f64;
+        let sample_sum = self.mean * count;
+        let sample_sum_sq = self.m2 + count * self.mean * self.mean;
+        let numerator = count * self.sample_common_sum - sample_sum * self.common_sum;
+        let sample_term = count * sample_sum_sq - sample_sum * sample_sum;
+        let common_term = count * self.common_sum_sq - self.common_sum * self.common_sum;
+        let denominator = (sample_term * common_term).sqrt();
+        if denominator <= f64::EPSILON {
+            0.0
+        } else {
+            (numerator / denominator).clamp(-1.0, 1.0)
+        }
+    }
+
+    fn spans_almost_full_scale(&self) -> bool {
+        self.minimum <= Self::NEAR_RAIL_CODES && self.maximum >= u16::MAX - Self::NEAR_RAIL_CODES
+    }
+
+    fn touches_a_rail(&self) -> bool {
+        self.minimum <= Self::NEAR_RAIL_CODES || self.maximum >= u16::MAX - Self::NEAR_RAIL_CODES
+    }
+
+    fn center_crossing_hz(&self, elapsed: Duration) -> f64 {
+        self.upward_center_crossings as f64 / elapsed.as_secs_f64().max(f64::EPSILON)
+    }
+}
+
+fn percent(part: u64, total: u64) -> f64 {
+    if total == 0 {
+        0.0
+    } else {
+        100.0 * part as f64 / total as f64
+    }
+}
+
+fn observe_signal_block(
+    block: &SampleBlock,
+    channel_stats: &mut Vec<ChannelSignalStats>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let channel_count = block.channels.len();
+    if channel_count == 0 {
+        return Err("acquisition block has no channels".into());
+    }
+    if channel_stats.is_empty() {
+        channel_stats.resize_with(channel_count, ChannelSignalStats::default);
+    } else if channel_stats.len() != channel_count {
+        return Err(format!(
+            "channel count changed during acquisition: {} to {channel_count}",
+            channel_stats.len()
+        )
+        .into());
+    }
+
+    let mut frames = block.samples.chunks_exact(channel_count);
+    for frame in &mut frames {
+        let common_mode =
+            frame.iter().map(|sample| f64::from(*sample)).sum::<f64>() / channel_count as f64;
+        for (stats, sample) in channel_stats.iter_mut().zip(frame) {
+            stats.observe(*sample, common_mode);
+        }
+    }
+    if !frames.remainder().is_empty() {
+        return Err("sample buffer is not sample-major interleaved".into());
+    }
+    Ok(())
+}
+
+fn print_signal_diagnostics(channel_stats: &[ChannelSignalStats], elapsed: Duration) {
+    println!("signal_quality (unsigned 16-bit ADC codes; center=32768):");
+    println!(
+        "channel  min    max    mean      stddev   near_rail  exact_rail  large_step  center_hz  common_corr"
+    );
+    for (channel, stats) in channel_stats.iter().enumerate() {
+        println!(
+            "{channel:>7}  {:>5}  {:>5}  {:>8.1}  {:>8.1}  {:>8.3}%  {:>9.3}%  {:>9.3}%  {:>9.1}  {:>11.3}",
+            stats.minimum,
+            stats.maximum,
+            stats.mean,
+            stats.standard_deviation(),
+            stats.rail_percent(),
+            stats.exact_rail_percent(),
+            stats.large_step_percent(),
+            stats.center_crossing_hz(elapsed),
+            stats.common_mode_correlation(),
+        );
+    }
+
+    let rail_touch_channels = channel_stats
+        .iter()
+        .filter(|stats| stats.touches_a_rail())
+        .count();
+    let full_scale_channels = channel_stats
+        .iter()
+        .filter(|stats| stats.spans_almost_full_scale())
+        .count();
+    let strongly_common_channels = channel_stats
+        .iter()
+        .filter(|stats| stats.common_mode_correlation().abs() >= 0.8)
+        .count();
+    let large_steps = channel_stats
+        .iter()
+        .map(|stats| stats.large_steps)
+        .sum::<u64>();
+    let mut center_frequencies = channel_stats
+        .iter()
+        .map(|stats| stats.center_crossing_hz(elapsed))
+        .collect::<Vec<_>>();
+    center_frequencies.sort_by(f64::total_cmp);
+    let median_center_hz = center_frequencies
+        .get(center_frequencies.len() / 2)
+        .copied()
+        .unwrap_or(0.0);
+    println!(
+        "signal_summary: rail_touch_channels={}/{} full_scale_channels={}/{} strongly_common_channels={}/{} median_center_hz={:.1} large_steps_per_second={:.1}",
+        rail_touch_channels,
+        channel_stats.len(),
+        full_scale_channels,
+        channel_stats.len(),
+        strongly_common_channels,
+        channel_stats.len(),
+        median_center_hz,
+        large_steps as f64 / elapsed.as_secs_f64().max(f64::EPSILON),
+    );
+    if rail_touch_channels * 2 >= channel_stats.len().max(1) {
+        println!(
+            "SIGNAL WARNING: most channels touch an ADC rail; this is saturation, not a normal low-noise baseline"
+        );
+    }
 }
 
 #[derive(Debug)]
@@ -152,10 +396,16 @@ fn parse_acquire(args: Vec<String>) -> Result<AcquireOptions, Box<dyn std::error
         seconds: 5,
         blocks_per_read: 8,
         queue_capacity: 8,
+        channel_count: 16,
     };
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
+            "--channels" => {
+                i += 1;
+                options.channel_count =
+                    args.get(i).ok_or("--channels requires a value")?.parse()?;
+            }
             "--seconds" => {
                 i += 1;
                 options.seconds = args.get(i).ok_or("--seconds requires a value")?.parse()?;
@@ -179,6 +429,9 @@ fn parse_acquire(args: Vec<String>) -> Result<AcquireOptions, Box<dyn std::error
         i += 1;
     }
 
+    if !matches!(options.channel_count, 16 | 64) {
+        return Err("--channels must be 16 or 64".into());
+    }
     if !(1..=3_600).contains(&options.seconds) {
         return Err("--seconds must be 1..3600".into());
     }
@@ -202,6 +455,7 @@ fn run_acquire(
     );
 
     let worker_config = AcquisitionWorkerConfig {
+        channel_count: options.channel_count,
         acquisition: AcquisitionConfig {
             blocks_per_read: options.blocks_per_read,
         },
@@ -228,6 +482,7 @@ fn run_acquire(
     let mut expected_first_sample = None;
     let mut raw_min = u16::MAX;
     let mut raw_max = u16::MIN;
+    let mut channel_stats = Vec::new();
 
     while Instant::now() < deadline {
         match handle.recv_timeout(Duration::from_millis(250)) {
@@ -237,6 +492,7 @@ fn run_acquire(
                 expected_first_sample = Some(block.last_sample_index().saturating_add(1));
                 blocks += 1;
                 samples_per_channel += block.samples_per_channel as u64;
+                observe_signal_block(&block, &mut channel_stats)?;
                 if let Some(minimum) = block.samples.iter().min() {
                     raw_min = raw_min.min(*minimum);
                 }
@@ -271,6 +527,7 @@ fn run_acquire(
     println!("timestamp_gaps: {}", stats.timestamp_gaps);
     println!("queue_overflows: {}", stats.queue_overflows);
     println!("empty_reads: {}", stats.empty_reads);
+    print_signal_diagnostics(&channel_stats, elapsed);
 
     if blocks == 0 {
         return Err("no acquisition blocks were received".into());
@@ -376,6 +633,7 @@ fn run_record(device: RhsDevice, options: RecordOptions) -> Result<(), Box<dyn s
     let bitfile_path = device.bitfile_path().to_path_buf();
     let bitfile_sha256 = sha256_file(&bitfile_path)?;
     let worker_config = AcquisitionWorkerConfig {
+        channel_count: options.acquisition.channel_count,
         acquisition: AcquisitionConfig {
             blocks_per_read: options.acquisition.blocks_per_read,
         },
@@ -569,6 +827,7 @@ fn run_viewer_check(
         options.seconds
     );
     let handle = device.spawn_acquisition(AcquisitionWorkerConfig {
+        channel_count: options.channel_count,
         acquisition: AcquisitionConfig {
             blocks_per_read: options.blocks_per_read,
         },
@@ -938,8 +1197,39 @@ fn run_stim_service_check() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn run_stim_session_check(device: RhsDevice) -> Result<(), Box<dyn std::error::Error>> {
-    let (mut session, ready) = device.open_stim_session()?;
+fn parse_stim_session_target(
+    args: &[String],
+) -> Result<Option<(u8, u8)>, Box<dyn std::error::Error>> {
+    match args {
+        [] => Ok(None),
+        [port_flag, port, stream_flag, stream]
+            if port_flag == "--port" && stream_flag == "--stream" =>
+        {
+            let port = match port.as_str() {
+                "A" => 0,
+                "B" => 1,
+                "C" => 2,
+                "D" => 3,
+                _ => return Err("--port must be A, B, C or D".into()),
+            };
+            let stream: u8 = stream.parse()?;
+            if stream > 7 {
+                return Err("--stream must be 0..7".into());
+            }
+            Ok(Some((port, stream)))
+        }
+        _ => Err("stim-session-check accepts optional --port A|B|C|D --stream 0..7".into()),
+    }
+}
+
+fn run_stim_session_check(
+    device: RhsDevice,
+    target: Option<(u8, u8)>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (mut session, ready) = match target {
+        Some((port, stream)) => device.open_stim_session_target(port, stream)?,
+        None => device.open_stim_session()?,
+    };
     if session.is_active() {
         return Err("new stimulation session unexpectedly reported an active command".into());
     }
@@ -956,11 +1246,44 @@ fn run_stim_session_check(device: RhsDevice) -> Result<(), Box<dyn std::error::E
     Ok(())
 }
 
-fn run_sync_session_check(device: RhsDevice) -> Result<(), Box<dyn std::error::Error>> {
+fn parse_sync_channel_mask(args: Vec<String>) -> Result<u16, Box<dyn std::error::Error>> {
+    match args.as_slice() {
+        [] => Ok(1),
+        [option, value] if option == "--channel-mask" => {
+            let parsed = if let Some(hex) = value.strip_prefix("0x") {
+                u16::from_str_radix(hex, 16)?
+            } else {
+                value.parse::<u16>()?
+            };
+            if parsed == 0 {
+                return Err("channel mask must select at least one channel".into());
+            }
+            Ok(parsed)
+        }
+        _ => Err("sync-session-check accepts only --channel-mask MASK after device options".into()),
+    }
+}
+
+fn run_sync_session_check(
+    device: RhsDevice,
+    channel_mask: u16,
+    channel_count: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut config = StimConfig {
+        channel: channel_mask.trailing_zeros() as i32,
+        channel_mask,
+        ..StimConfig::default()
+    };
+    if channel_count == 64 {
+        for stream in [2, 3, 4, 5] {
+            config.stream_masks[stream] = channel_mask;
+        }
+    }
     let handle = device.spawn_acquisition(AcquisitionWorkerConfig {
+        channel_count,
         acquisition: AcquisitionConfig { blocks_per_read: 8 },
         data_queue_capacity: 8,
-        stimulation: Some(StimConfig::default()),
+        stimulation: Some(config),
         ..AcquisitionWorkerConfig::default()
     })?;
     println!("mode: synchronized acquisition session (trigger not scheduled)");
@@ -972,6 +1295,12 @@ fn run_sync_session_check(device: RhsDevice) -> Result<(), Box<dyn std::error::E
         handle.info().sample_rate_hz
     );
     println!("preset_preloaded: true");
+    println!(
+        "channels: {} streams: {:?}",
+        handle.info().channel_count,
+        handle.info().streams
+    );
+    println!("channel_mask: 0x{channel_mask:04x}");
     println!("stim_cmd_mode: disabled until a scheduled command is due");
 
     let deadline = Instant::now() + Duration::from_secs(2);
@@ -1062,6 +1391,8 @@ impl StimExecutor for HardwareStimExecutor {
 fn stim_config_from_parameters(parameters: &StimParameters) -> Result<StimConfig, String> {
     Ok(StimConfig {
         channel: i32::from(parameters.channel),
+        channel_mask: 0,
+        stream_masks: [0; 8],
         trigger: i32::from(parameters.trigger),
         pulses: i32::from(parameters.pulses),
         magnitude_steps: i32::from(parameters.magnitude_steps),
@@ -1079,6 +1410,9 @@ fn stim_config_from_parameters(parameters: &StimParameters) -> Result<StimConfig
 struct StimOptions {
     preset_id: String,
     operator: String,
+    channel: u8,
+    expected_port: char,
+    expected_stream: u8,
     confirm_dummy_load: bool,
     confirm_measurement_ready: bool,
     emergency_stop_after_ms: Option<u64>,
@@ -1087,6 +1421,9 @@ struct StimOptions {
 fn parse_stim(args: Vec<String>) -> Result<StimOptions, Box<dyn std::error::Error>> {
     let mut preset_id = "bench-single-v1".to_owned();
     let mut operator = None;
+    let mut channel = None;
+    let mut expected_port = None;
+    let mut expected_stream = None;
     let mut confirm_dummy_load = false;
     let mut confirm_measurement_ready = false;
     let mut emergency_stop_after_ms = None;
@@ -1103,6 +1440,30 @@ fn parse_stim(args: Vec<String>) -> Result<StimOptions, Box<dyn std::error::Erro
             "--operator" => {
                 i += 1;
                 operator = Some(args.get(i).ok_or("--operator requires a value")?.clone());
+            }
+            "--channel" => {
+                i += 1;
+                let number: u8 = args.get(i).ok_or("--channel requires a value")?.parse()?;
+                if !(1..=16).contains(&number) {
+                    return Err("--channel must be between 1 and 16".into());
+                }
+                channel = Some(number - 1);
+            }
+            "--port" => {
+                i += 1;
+                let port = args.get(i).ok_or("--port requires A, B, C or D")?;
+                if !matches!(port.as_str(), "A" | "B" | "C" | "D") {
+                    return Err("--port must be A, B, C or D".into());
+                }
+                expected_port = port.chars().next();
+            }
+            "--stream" => {
+                i += 1;
+                let stream: u8 = args.get(i).ok_or("--stream requires 0..7")?.parse()?;
+                if stream > 7 {
+                    return Err("--stream must be 0..7".into());
+                }
+                expected_stream = Some(stream);
             }
             "--emergency-stop-after-ms" => {
                 i += 1;
@@ -1141,15 +1502,18 @@ fn parse_stim(args: Vec<String>) -> Result<StimOptions, Box<dyn std::error::Erro
     Ok(StimOptions {
         preset_id,
         operator,
+        channel: channel.ok_or("stim requires an explicit --channel 1..16")?,
+        expected_port: expected_port.ok_or("stim requires an explicit --port A|B|C|D")?,
+        expected_stream: expected_stream.ok_or("stim requires an explicit --stream 0..7")?,
         confirm_dummy_load,
         confirm_measurement_ready,
         emergency_stop_after_ms,
     })
 }
 
-fn bench_stim_presets() -> Vec<StimPreset> {
+fn bench_stim_presets(channel: u8) -> Vec<StimPreset> {
     let base = StimParameters {
-        channel: 0,
+        channel,
         trigger: 0,
         pulses: 1,
         magnitude_steps: 1,
@@ -1174,10 +1538,10 @@ fn bench_stim_presets() -> Vec<StimPreset> {
     ]
 }
 
-fn bench_stim_policy() -> StimSafetyPolicy {
+fn bench_stim_policy(channel: u8) -> StimSafetyPolicy {
     StimSafetyPolicy {
         hardware_timestep_hz: 30_000,
-        allowed_channels: vec![0],
+        allowed_channels: vec![channel],
         allowed_step_sizes: vec![StimStepSize::N10],
         max_magnitude_steps: 1,
         max_phase_steps: 6,
@@ -1195,6 +1559,40 @@ fn bench_stim_policy() -> StimSafetyPolicy {
     }
 }
 
+fn validate_bench_scan(scan: &ScanReport, options: &StimOptions) -> Result<(), String> {
+    let unique_streams = scan
+        .chips
+        .iter()
+        .map(|chip| chip.command_stream)
+        .collect::<BTreeSet<_>>();
+    let valid_multi_chip = scan.chips.len() == 4
+        && scan.channels_on_port == [0, 32, 32, 0]
+        && ['B', 'C'].iter().all(|port| {
+            scan.chips
+                .iter()
+                .filter(|chip| chip.port_name == *port)
+                .count()
+                == 2
+        });
+    let target_present = scan.chips.iter().any(|chip| {
+        chip.port_name == options.expected_port
+            && chip.command_stream == i32::from(options.expected_stream)
+    });
+    if scan.return_code < 0
+        || scan.pipe_read_error != 0
+        || scan.chips.iter().any(|chip| chip.chip_name != "RHS2116")
+        || unique_streams.len() != scan.chips.len()
+        || !target_present
+        || !(scan.chips.len() == 1 || valid_multi_chip)
+    {
+        return Err(format!(
+            "real output requires a matching RHS2116 on port {} stream {} and either one chip or four B/C chips; scan: {}",
+            options.expected_port, options.expected_stream, scan.message
+        ));
+    }
+    Ok(())
+}
+
 fn run_hardware_stim(
     device: RhsDevice,
     options: StimOptions,
@@ -1202,16 +1600,31 @@ fn run_hardware_stim(
     if !options.confirm_dummy_load || !options.confirm_measurement_ready {
         return Err("physical bench confirmations were not supplied".into());
     }
+    if device.requested_serial().is_none() {
+        return Err("real output requires --serial to select the exact FrontPanel device".into());
+    }
+    let scan = device.scan()?;
+    validate_bench_scan(&scan, &options)?;
 
-    let presets = bench_stim_presets();
+    let presets = bench_stim_presets(options.channel);
     let selected = presets
         .iter()
         .find(|preset| preset.id == options.preset_id)
         .ok_or("selected bench preset is unavailable")?
         .clone();
     let phase_charge = selected.parameters.phase_charge_picocoulombs_ceil(30_000);
-    let mut service = StimService::new(bench_stim_policy(), presets)?;
-    let (session, ready) = device.open_stim_session()?;
+    let mut service = StimService::new(bench_stim_policy(options.channel), presets)?;
+    let (session, ready) = device.open_stim_session_target(
+        (options.expected_port as u8) - b'A',
+        options.expected_stream,
+    )?;
+    if ready.pipe_read_error != 0 {
+        return Err(format!(
+            "stimulation session reports USB pipe error {}",
+            ready.pipe_read_error
+        )
+        .into());
+    }
     let mut executor = HardwareStimExecutor::new(session);
     let clock = Instant::now();
     let arm = service.arm(
@@ -1320,8 +1733,9 @@ fn print_report(report: &rhs_device::ScanReport) {
 }
 
 fn print_usage() {
+    println!("rhs-cli stim64-functional-check --serial SERIAL --electrode B-000 --operator NAME --audit PATH --confirm-no-bio --confirm-real-output");
     println!("rhs-cli scan [--bitfile PATH] [--serial SERIAL]");
-    println!("rhs-cli acquire [--seconds 5] [--blocks-per-read 8] [--queue-capacity 8]");
+    println!("rhs-cli acquire [--channels 16|64] [--seconds 5] [--blocks-per-read 8] [--queue-capacity 8]");
     println!(
         "rhs-cli record --output PATH [--seconds 5] [--blocks-per-read 8] [--queue-capacity 8]"
     );
@@ -1329,15 +1743,81 @@ fn print_usage() {
     println!("rhs-cli viewer-check [--seconds 5] [--blocks-per-read 8] [--queue-capacity 8]");
     println!("rhs-cli synthetic-check [--blocks 100]");
     println!("rhs-cli stim-service-check");
-    println!("rhs-cli stim-session-check [--bitfile PATH] [--serial SERIAL]");
-    println!("rhs-cli sync-session-check [--bitfile PATH] [--serial SERIAL]");
-    println!("rhs-cli stim --preset bench-single-v1|bench-train-v1 --operator NAME \\");
+    println!("rhs-cli stim-session-check [--bitfile PATH] [--serial SERIAL] [--port A|B|C|D --stream 0..7]");
+    println!("rhs-cli sync-session-check [--bitfile PATH] [--serial SERIAL] [--channel-mask MASK]");
+    println!(
+        "rhs-cli sync64-session-check [--bitfile PATH] [--serial SERIAL] [--channel-mask MASK]"
+    );
+    println!(
+        "rhs-cli stim --serial SERIAL --port A|B|C|D --stream 0..7 --channel 1..16 --preset bench-single-v1|bench-train-v1 --operator NAME \\"
+    );
     println!("  --confirm-dummy-load --confirm-measurement-ready [--emergency-stop-after-ms 150]");
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_only_diagnostics_accept_only_supported_channel_counts() {
+        assert_eq!(parse_acquire(vec![]).unwrap().channel_count, 16);
+        assert_eq!(
+            parse_acquire(vec!["--channels".into(), "64".into()])
+                .unwrap()
+                .channel_count,
+            64
+        );
+        assert!(parse_acquire(vec!["--channels".into(), "120".into()]).is_err());
+        assert!(parse_acquire(vec!["--channels".into()]).is_err());
+    }
+
+    #[test]
+    fn session_check_target_requires_explicit_port_and_stream() {
+        assert_eq!(parse_stim_session_target(&[]).unwrap(), None);
+        assert_eq!(
+            parse_stim_session_target(&[
+                "--port".into(),
+                "C".into(),
+                "--stream".into(),
+                "5".into()
+            ])
+            .unwrap(),
+            Some((2, 5))
+        );
+        assert!(parse_stim_session_target(&["--port".into(), "B".into()]).is_err());
+        assert!(parse_stim_session_target(&[
+            "--port".into(),
+            "C".into(),
+            "--stream".into(),
+            "8".into()
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn sync_check_accepts_sixteen_channel_mask_without_triggering() {
+        assert_eq!(parse_sync_channel_mask(vec![]).unwrap(), 1);
+        assert_eq!(
+            parse_sync_channel_mask(vec!["--channel-mask".into(), "0xffff".into()]).unwrap(),
+            u16::MAX
+        );
+        assert!(parse_sync_channel_mask(vec!["--channel-mask".into(), "0".into()]).is_err());
+        assert!(parse_sync_channel_mask(vec!["--channel-mask".into(), "0x10000".into()]).is_err());
+    }
+
+    #[test]
+    fn signal_stats_detect_rail_saturation_and_common_mode() {
+        let mut stats = ChannelSignalStats::default();
+        for sample in [0, 16_384, 32_768, 49_152, 65_535] {
+            stats.observe(sample, f64::from(sample));
+        }
+
+        assert!(stats.touches_a_rail());
+        assert!(stats.spans_almost_full_scale());
+        assert_eq!(stats.exact_rail_samples, 2);
+        assert!((stats.common_mode_correlation() - 1.0).abs() < 1e-12);
+        assert_eq!(stats.upward_center_crossings, 1);
+    }
 
     #[test]
     fn stim_requires_both_physical_confirmations() {
@@ -1348,6 +1828,35 @@ mod tests {
         ])
         .unwrap_err();
         assert!(error.to_string().contains("both"));
+    }
+
+    #[test]
+    fn stim_requires_explicit_port_stream_and_channel() {
+        let base = vec![
+            "--operator".to_owned(),
+            "tester".to_owned(),
+            "--confirm-dummy-load".to_owned(),
+            "--confirm-measurement-ready".to_owned(),
+        ];
+        assert!(parse_stim(base.clone())
+            .unwrap_err()
+            .to_string()
+            .contains("--channel"));
+        let mut with_channel = base;
+        with_channel.extend(["--channel".to_owned(), "1".to_owned()]);
+        assert!(parse_stim(with_channel.clone())
+            .unwrap_err()
+            .to_string()
+            .contains("--port"));
+        with_channel.extend(["--port".to_owned(), "B".to_owned()]);
+        assert!(parse_stim(with_channel.clone())
+            .unwrap_err()
+            .to_string()
+            .contains("--stream"));
+        with_channel.extend(["--stream".to_owned(), "2".to_owned()]);
+        let options = parse_stim(with_channel).unwrap();
+        assert_eq!(options.expected_port, 'B');
+        assert_eq!(options.expected_stream, 2);
     }
 
     #[test]
@@ -1366,7 +1875,7 @@ mod tests {
 
     #[test]
     fn bench_train_maps_to_bounded_hardware_config() {
-        let train = bench_stim_presets()
+        let train = bench_stim_presets(0)
             .into_iter()
             .find(|preset| preset.id == "bench-train-v1")
             .unwrap();
@@ -1393,6 +1902,12 @@ mod tests {
         let options = parse_stim(vec![
             "--operator".to_owned(),
             "tester".to_owned(),
+            "--port".to_owned(),
+            "A".to_owned(),
+            "--stream".to_owned(),
+            "0".to_owned(),
+            "--channel".to_owned(),
+            "1".to_owned(),
             "--preset".to_owned(),
             "bench-train-v1".to_owned(),
             "--emergency-stop-after-ms".to_owned(),
@@ -1402,5 +1917,97 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(options.emergency_stop_after_ms, Some(150));
+    }
+
+    #[test]
+    fn all_sixteen_bench_channels_map_to_unique_rhs2116_outputs() {
+        for number in 1..=16_u8 {
+            let options = parse_stim(vec![
+                "--operator".to_owned(),
+                "tester".to_owned(),
+                "--port".to_owned(),
+                "A".to_owned(),
+                "--stream".to_owned(),
+                "0".to_owned(),
+                "--channel".to_owned(),
+                number.to_string(),
+                "--confirm-dummy-load".to_owned(),
+                "--confirm-measurement-ready".to_owned(),
+            ])
+            .unwrap();
+            assert_eq!(options.channel, number - 1);
+            assert_eq!(options.expected_port, 'A');
+            assert_eq!(options.expected_stream, 0);
+            let preset = bench_stim_presets(options.channel).remove(0);
+            assert_eq!(preset.parameters.channel, number - 1);
+            assert_eq!(
+                stim_config_from_parameters(&preset.parameters)
+                    .unwrap()
+                    .channel,
+                i32::from(number - 1)
+            );
+            assert_eq!(
+                bench_stim_policy(options.channel).allowed_channels,
+                vec![number - 1]
+            );
+        }
+        for invalid in ["0", "17"] {
+            let error = parse_stim(vec![
+                "--operator".to_owned(),
+                "tester".to_owned(),
+                "--channel".to_owned(),
+                invalid.to_owned(),
+                "--confirm-dummy-load".to_owned(),
+                "--confirm-measurement-ready".to_owned(),
+            ])
+            .unwrap_err();
+            assert!(error.to_string().contains("between 1 and 16"));
+        }
+    }
+
+    #[test]
+    fn four_chip_bench_scan_requires_exact_target_and_distinct_streams() {
+        let options = parse_stim(vec![
+            "--operator".into(),
+            "tester".into(),
+            "--port".into(),
+            "C".into(),
+            "--stream".into(),
+            "5".into(),
+            "--channel".into(),
+            "16".into(),
+            "--confirm-dummy-load".into(),
+            "--confirm-measurement-ready".into(),
+        ])
+        .unwrap();
+        let chip = |port_name, command_stream| rhs_device::ChipInfo {
+            chip_type: 0,
+            chip_name: "RHS2116",
+            port_index: if port_name == 'B' { 1 } else { 2 },
+            port_name,
+            command_stream,
+        };
+        let mut scan = ScanReport {
+            return_code: 1,
+            pipe_read_error: 0,
+            message: "four RHS2116 chips".into(),
+            chips: vec![chip('B', 2), chip('B', 3), chip('C', 4), chip('C', 5)],
+            channels_on_port: [0, 32, 32, 0],
+        };
+        assert!(validate_bench_scan(&scan, &options).is_ok());
+        scan.chips[3].command_stream = 4;
+        assert!(validate_bench_scan(&scan, &options).is_err());
+        scan.chips[3].command_stream = 5;
+        scan.chips[3].port_name = 'B';
+        assert!(validate_bench_scan(&scan, &options).is_err());
+        scan.chips[3].port_name = 'C';
+        scan.chips[3].chip_name = "RHD2132";
+        assert!(validate_bench_scan(&scan, &options).is_err());
+        scan.chips[3].chip_name = "RHS2116";
+        scan.channels_on_port[2] = 16;
+        assert!(validate_bench_scan(&scan, &options).is_err());
+        scan.channels_on_port[2] = 32;
+        scan.pipe_read_error = 1;
+        assert!(validate_bench_scan(&scan, &options).is_err());
     }
 }

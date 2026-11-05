@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "RHS Studio",
+  "productName": "NeuroX Studio",
   "version": "0.1.0",
   "identifier": "cn.rhs-lab.studio",
   "build": {
@@ -14,7 +14,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "RHS Studio",
+        "title": "NeuroX Studio",
         "width": 1460,
         "height": 920,
         "minWidth": 1040,

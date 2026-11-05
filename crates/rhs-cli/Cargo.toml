@@ -10,3 +10,4 @@ rhs-nodes = { path = "../rhs-nodes" }
 rhs-pipeline = { path = "../rhs-pipeline" }
 rhs-storage = { path = "../rhs-storage" }
 rhs-stim = { path = "../rhs-stim" }
+serde_json = "1"

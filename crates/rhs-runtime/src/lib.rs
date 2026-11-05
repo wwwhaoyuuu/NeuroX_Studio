@@ -299,6 +299,8 @@ impl<C: AcquisitionStimControl> StimExecutor for SynchronizedStimExecutor<C> {
 fn stim_config_from_parameters(parameters: &StimParameters) -> Result<StimConfig, String> {
     Ok(StimConfig {
         channel: i32::from(parameters.channel),
+        channel_mask: 0,
+        stream_masks: [0; 8],
         trigger: i32::from(parameters.trigger),
         pulses: i32::from(parameters.pulses),
         magnitude_steps: i32::from(parameters.magnitude_steps),

@@ -2,8 +2,12 @@
 **/target/
 
 /work/
+/releases/
+__pycache__/
+*.py[cod]
 **/node_modules/
 **/dist/
+**/artifacts/
 apps/rhs-desktop/src-tauri/gen/
 
 scripts/local-env.bat

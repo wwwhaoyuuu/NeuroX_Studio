@@ -22,4 +22,4 @@ for (const entry of fs.readdirSync(source, { withFileTypes: true })) {
   }
 }
 fs.copyFileSync(lucide, path.join(output, "vendor", "lucide.js"));
-console.log(`Built RHS Studio frontend at ${output}`);
+console.log(`Built NeuroX Studio frontend at ${output}`);

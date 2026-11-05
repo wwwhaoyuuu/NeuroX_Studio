@@ -40,5 +40,5 @@ const server = http.createServer((request, response) => {
 });
 
 server.listen(port, "127.0.0.1", () => {
-  console.log(`RHS Studio ${useDist ? "preview" : "dev"} server: http://127.0.0.1:${port}`);
+  console.log(`NeuroX Studio ${useDist ? "preview" : "dev"} server: http://127.0.0.1:${port}`);
 });

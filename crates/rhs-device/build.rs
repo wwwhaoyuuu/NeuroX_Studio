@@ -56,6 +56,11 @@ fn main() {
         intan_dir.join("rhxregisters.cpp"),
     ];
 
+    println!("cargo:rerun-if-changed=native/rhs_stim_sequence.h");
+    println!("cargo:rerun-if-changed=native/rhs_stream_selection.h");
+    println!("cargo:rerun-if-changed=native/rhs_scan_bridge.h");
+    println!("cargo:rerun-if-changed=native/rhs_impedance_math.h");
+
     let mut objects = Vec::new();
     for src in &sources {
         println!("cargo:rerun-if-changed={}", src.display());

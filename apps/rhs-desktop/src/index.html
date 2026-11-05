@@ -4,7 +4,8 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light" />
-    <title>RHS Studio</title>
+    <title>NeuroX Studio</title>
+    <link rel="icon" href="data:," />
     <link rel="stylesheet" href="./styles.css" />
     <script src="./vendor/lucide.js" defer></script>
     <script type="module" src="./app.js"></script>
@@ -15,7 +16,7 @@
         <div class="brand-block">
           <div class="brand-mark" aria-hidden="true"><i data-lucide="activity"></i></div>
           <div>
-            <strong>RHS Studio</strong>
+            <strong>NeuroX Studio</strong>
             <span>微电极实验工作台</span>
           </div>
         </div>
@@ -36,6 +37,8 @@
         </div>
 
         <div class="topbar-actions">
+          <button class="icon-button" id="toggle-left-panel" title="收起设备与处理链" aria-label="收起设备与处理链" aria-controls="left-panel" aria-expanded="true"><i data-lucide="panel-left"></i></button>
+          <button class="icon-button" id="toggle-right-panel" title="收起采集与刺激设置" aria-label="收起采集与刺激设置" aria-controls="right-panel" aria-expanded="true"><i data-lucide="panel-right"></i></button>
           <div class="connection-state" id="connection-state">
             <span class="status-dot"></span>
             <span id="connection-label">未连接</span>
@@ -47,7 +50,7 @@
       </header>
 
       <main class="workspace">
-        <aside class="left-panel">
+        <aside class="left-panel" id="left-panel">
           <section class="panel-section device-section">
             <div class="section-heading">
               <div><span class="eyebrow">HARDWARE</span><h2>设备</h2></div>
@@ -58,7 +61,7 @@
             <div class="device-tile" id="device-tile">
               <div class="device-icon"><i data-lucide="cpu"></i></div>
               <div class="device-copy">
-                <strong id="device-name">RHS2116</strong>
+                <strong id="device-name">采集设备</strong>
                 <span id="device-route">等待扫描</span>
               </div>
               <span class="health-led" id="device-led"></span>
@@ -71,7 +74,7 @@
               <summary>FPGA 配置</summary>
               <label class="field">
                 <span>Bitfile</span>
-                <input id="bitfile-path" placeholder="由 RHS_BITFILE 提供，或在此输入" autocomplete="off" />
+                <input id="bitfile-path" placeholder="自动查找 FPGA 配置文件，或输入路径" autocomplete="off" />
               </label>
             </details>
           </section>
@@ -96,11 +99,12 @@
             <div class="pipeline-flow">
               <div class="pipeline-node source-node">
                 <div class="node-symbol"><i data-lucide="radio-tower"></i></div>
-                <div class="source-node-copy"><strong>RHS Source</strong><span id="source-node-summary">16 ch · 30 kHz</span></div>
+                <div class="source-node-copy"><strong>采集源</strong><span id="source-node-summary">16 ch · 30 kHz</span></div>
                 <span class="node-state">ON</span>
                 <label class="source-profile-field">
-                  <span>MEA 芯片型号</span>
-                  <select id="mea-profile" aria-label="MEA 芯片型号"></select>
+                  <span>阵列配置</span>
+                  <select id="mea-profile" aria-label="阵列配置"></select>
+                  <button type="button" class="icon-button subtle" id="open-channel-editor" title="编辑通道与阵列"><i data-lucide="table-properties"></i></button>
                 </label>
               </div>
               <div class="pipeline-node-list" id="pipeline-node-list"></div>
@@ -115,13 +119,23 @@
           <div class="data-toolbar">
             <div class="tab-list" role="tablist">
               <button class="tab active" data-view="waveform-view"><i data-lucide="audio-waveform"></i>波形</button>
+              <button class="tab" data-view="activity-view"><i data-lucide="grid-3x3"></i>活动图</button>
+              <button class="tab" data-view="spike-view"><i data-lucide="scan-line"></i>尖峰</button>
+              <button class="tab" data-view="spectrum-view"><i data-lucide="chart-no-axes-combined"></i>频域</button>
+              <button class="tab" data-view="statistics-view"><i data-lucide="chart-column"></i>统计</button>
+              <button class="tab" data-view="device-tools-view"><i data-lucide="wrench"></i>设备工具</button>
               <button class="tab" data-view="game-view"><i data-lucide="layout-grid"></i>游戏映射</button>
               <button class="tab" data-view="performance-view"><i data-lucide="gauge"></i>性能</button>
             </div>
-            <div class="display-tools">
+            <div class="display-tools" id="display-tools">
+              <div class="channel-pager" id="channel-pager" aria-label="波形通道分页" hidden>
+                <button class="icon-button dark-tool" id="previous-channel-page" title="上一组通道" aria-label="上一组通道"><i data-lucide="chevron-left"></i></button>
+                <output id="channel-page-label">1–16 / 16</output>
+                <button class="icon-button dark-tool" id="next-channel-page" title="下一组通道" aria-label="下一组通道"><i data-lucide="chevron-right"></i></button>
+              </div>
               <label class="toolbar-field">
                 <span>增益</span>
-                <input id="display-gain" type="range" min="0.25" max="4" step="0.25" value="1" />
+                <input id="display-gain" type="range" min="0.05" max="4" step="0.05" value="1" aria-label="波形显示增益" />
                 <output id="gain-label">1.00×</output>
               </label>
               <select id="time-window" title="显示时窗">
@@ -133,21 +147,77 @@
               <button class="icon-button dark-tool" id="pause-display" title="暂停波形显示"><i data-lucide="pause"></i></button>
               <button class="icon-button dark-tool" id="fit-waveform" title="适配波形高度"><i data-lucide="maximize-2"></i></button>
             </div>
+            <button class="icon-button dark-tool export-tool" id="open-export" title="导出数据与报告"><i data-lucide="download"></i></button>
           </div>
 
+          <div class="acquisition-fault" id="acquisition-fault" role="alert" hidden>
+            <i data-lucide="triangle-alert"></i>
+            <div>
+              <strong id="acquisition-fault-title"></strong>
+              <span id="acquisition-fault-detail"></span>
+              <span class="fault-technical" id="acquisition-fault-error"></span>
+            </div>
+          </div>
           <div class="view-stack">
             <div class="view-panel active" id="waveform-view">
+              <div class="waveform-focus-bar">
+                <div class="waveform-modes" role="group" aria-label="波形显示模式">
+                  <button id="waveform-multi" aria-pressed="true" title="返回多通道波形"><i data-lucide="rows-3"></i>多通道</button>
+                  <button id="waveform-single" aria-pressed="false" title="放大选中的单个通道"><i data-lucide="zoom-in"></i>单通道</button>
+                </div>
+                <label id="waveform-layout-field">布局 <select id="waveform-layout" aria-label="多通道波形布局"><option value="dual-64" selected>双列 · 64 通道</option><option value="single-16">单列 · 16 通道</option></select></label>
+                <label>通道 <select id="focus-channel" aria-label="放大查看的通道"></select></label>
+                <div id="focus-navigation" class="focus-navigation" hidden>
+                  <button class="icon-button dark-tool" id="previous-focus-channel" title="上一个通道" aria-label="上一个通道"><i data-lucide="chevron-left"></i></button>
+                  <button class="icon-button dark-tool" id="next-focus-channel" title="下一个通道" aria-label="下一个通道"><i data-lucide="chevron-right"></i></button>
+                </div>
+                <button id="focus-fit-waveform" class="focus-fit-waveform" title="按当前显示通道自动适配幅值"><i data-lucide="maximize-2"></i>适配幅值</button>
+                <label id="focus-window-field" hidden>时窗 <select id="focus-time-window" aria-label="单通道显示时窗"><option value="100">100 ms</option><option value="250" selected>250 ms</option><option value="500">500 ms</option><option value="1000">1 s</option></select></label>
+                <div id="focus-analysis-actions" class="focus-analysis-actions" hidden>
+                  <button id="focus-spectrum" class="focus-fit-waveform" title="查看当前通道频谱"><i data-lucide="chart-no-axes-combined"></i>频谱</button>
+                  <button id="focus-spikes" class="focus-fit-waveform" title="查看当前通道尖峰片段与统计"><i data-lucide="scan-line"></i>尖峰分析</button>
+                </div>
+                <span id="focus-channel-status"></span>
+                <div class="waveform-spike-controls">
+                  <label><input id="waveform-spike-markers" type="checkbox" checked /><span class="spike-marker-key"></span>尖峰标记</label>
+                  <output id="waveform-spike-count">0 点</output>
+                  <span id="waveform-spike-state">检测未开启</span>
+                  <span id="waveform-spike-threshold" title="检测带通开启时，阈值虚线显示在尖峰片段图中"></span>
+                  <button id="waveform-spike-settings" class="icon-button dark-tool" title="尖峰检测设置" aria-label="尖峰检测设置"><i data-lucide="scan-line"></i></button>
+                </div>
+              </div>
+              <form id="focus-range-form" class="focus-range-form">
+                <strong id="range-channel-name"></strong>
+                <label>下限 <input id="focus-range-min" type="number" step="any" min="-1000000" max="1000000" required aria-label="当前通道显示下限（微伏）" /></label>
+                <span>至</span>
+                <label>上限 <input id="focus-range-max" type="number" step="any" min="-1000000" max="1000000" required aria-label="当前通道显示上限（微伏）" /></label>
+                <span>µV</span>
+                <button type="submit" id="focus-range-apply" class="icon-button dark-tool" title="应用当前通道显示范围" aria-label="应用当前通道显示范围"><i data-lucide="check"></i></button>
+                <button type="button" id="focus-range-reset" class="icon-button dark-tool" title="恢复当前通道的增益量程" aria-label="恢复当前通道的增益量程"><i data-lucide="rotate-ccw"></i></button>
+                <button type="submit" id="all-channel-range-apply" class="focus-fit-waveform" title="将输入范围应用到当前阵列的全部通道，包括其他页"><i data-lucide="copy-check"></i>应用到全部通道</button>
+                <button type="button" id="all-channel-range-reset" class="focus-fit-waveform" title="清除当前阵列全部通道的自定义显示范围"><i data-lucide="rotate-ccw"></i>重置全部</button>
+              </form>
               <div class="waveform-shell">
+                <div class="waveform-stage plot-area">
                 <div class="channel-labels" id="channel-labels"></div>
-                <div class="plot-area">
                   <canvas id="waveform" aria-label="16 通道实时波形"></canvas>
+                  <div id="waveform-spike-tooltip" class="waveform-spike-tooltip" role="tooltip" hidden></div>
                   <div class="plot-empty" id="plot-empty">
                     <i data-lucide="activity"></i>
                     <strong>等待采集数据</strong>
-                    <span>RHS2116 · 16 channels</span>
+                    <span>16 通道 · 单芯片</span>
                   </div>
-                  <div class="plot-badge"><span id="plot-rate">30.0 kHz</span><span id="plot-mode">RAW</span></div>
+                  <div class="plot-badge"><span id="plot-display-gap" title="显示时间线上检测到缺口；采集丢数请查看时间戳断裂与队列溢出指标" hidden></span><span id="plot-rate">30.0 kHz</span><span id="plot-mode">RAW</span></div>
                 </div>
+              </div>
+              <div class="waveform-readout">
+                <label>通道 <select id="amplitude-channel" aria-label="查看幅值的通道"></select></label>
+                <span>峰峰值 <strong id="waveform-peak-to-peak">—</strong></span>
+                <span>显示范围 <strong id="waveform-visible-range">—</strong></span>
+                <span>最小 <strong id="waveform-minimum">—</strong></span>
+                <span>最大 <strong id="waveform-maximum">—</strong></span>
+                <strong class="waveform-rail-warning" id="waveform-rail-warning" hidden>触及 ADC 边界</strong>
+                <strong class="waveform-rail-warning" id="waveform-range-clipped" hidden>超出显示范围</strong>
               </div>
               <div class="metrics-strip">
                 <div><span>样本率</span><strong id="metric-sample-rate">—</strong></div>
@@ -158,7 +228,172 @@
               </div>
             </div>
 
+            <div class="view-panel activity-view" id="activity-view">
+              <header class="analysis-heading">
+                <div>
+                  <span class="eyebrow">MEA ACTIVITY</span>
+                  <strong id="activity-profile-name">16 通道 · 单芯片</strong>
+                </div>
+                <div class="analysis-stats">
+                  <span><small>数据通道</small><strong id="activity-data-channels">0 / 16</strong></span>
+                  <span><small>最活跃</small><strong id="activity-peak-channel">—</strong></span>
+                  <span><small id="activity-peak-label">瞬时事件</small><strong id="activity-peak-value">无事件</strong></span>
+                  <label class="analysis-select"><small>显示</small><select id="activity-metric"><option value="spike-flash">瞬时闪烁</option><option value="spike-rate">窗口放电率</option></select></label>
+                  <label class="analysis-select"><small>统计窗口</small><select id="activity-window"><option value="1000">1 s</option><option value="5000">5 s</option><option value="10000" selected>10 s</option><option value="30000">30 s</option></select></label>
+                  <label class="analysis-select"><small>闪烁时长</small><select id="activity-flash-ms"><option value="100">100 ms</option><option value="200" selected>200 ms</option><option value="500">500 ms</option></select></label>
+                  <label class="analysis-select"><small>色阶上限 / Hz</small><input id="activity-rate-max" type="number" min="0.1" max="1000" step="0.1" value="20" /></label>
+                </div>
+              </header>
+              <div class="activity-layout">
+                <div class="activity-stage">
+                  <div class="mea-grid activity-mea-grid" id="activity-mea-grid" aria-label="MEA 实时活动热图"></div>
+                </div>
+                <aside class="activity-inspector">
+                  <div class="inspector-heading"><span>通道详情</span><strong id="activity-focus-channel">—</strong></div>
+                  <button class="activity-focus-waveform" id="activity-focus-waveform" title="放大查看当前通道波形"><i data-lucide="zoom-in"></i>查看波形</button>
+                  <dl>
+                    <div><dt>平均峰峰值</dt><dd id="activity-focus-range">—</dd></div>
+                    <div><dt>峰值偏移</dt><dd id="activity-focus-peak">—</dd></div>
+                    <div><dt>事件率</dt><dd id="activity-focus-rate">—</dd></div>
+                    <div><dt>本块基线</dt><dd id="activity-focus-baseline">—</dd></div>
+                    <div><dt>噪声估计 σ(MAD)</dt><dd id="activity-focus-noise">—</dd></div>
+                    <div><dt>数据质量</dt><dd id="activity-focus-quality">—</dd></div>
+                    <div><dt>检测噪声 σ</dt><dd id="activity-focus-detection-noise">—</dd></div>
+                    <div><dt>检测阈值</dt><dd id="activity-focus-threshold">—</dd></div>
+                  </dl>
+                  <div class="activity-scale" aria-label="活动强度图例">
+                    <span>无事件</span><i></i><span id="activity-scale-high">200 ms</span>
+                  </div>
+                  <div class="analysis-status" id="activity-status"><span class="status-dot"></span>等待实时数据</div>
+                </aside>
+              </div>
+            </div>
+
+            <div class="view-panel spike-view" id="spike-view">
+              <header class="analysis-heading">
+                <div>
+                  <span class="eyebrow">SPIKE EVENTS</span>
+                  <strong>候选尖峰</strong>
+                </div>
+                <div class="spike-controls">
+                  <button id="spike-return-waveform" class="icon-button dark-tool" title="返回波形" aria-label="返回波形"><i data-lucide="arrow-left"></i></button>
+                  <select id="spike-channel-filter" aria-label="尖峰通道"><option value="all">全部通道</option></select>
+                  <select id="spike-display" aria-label="尖峰显示方式"><option value="raster">时间栅格</option><option value="waveforms">逐通道波形</option><option value="values">事件数值</option></select>
+                  <select id="spike-scale" aria-label="尖峰波形纵轴范围"><option value="0">自动量程</option><option value="100">±100 µV</option><option value="250">±250 µV</option><option value="1000">±1000 µV</option></select>
+                  <label><span>窗口</span><select id="spike-window"><option value="5000">5 s</option><option value="10000" selected>10 s</option><option value="30000">30 s</option></select></label>
+                  <button class="icon-button" id="spike-export" title="导出界面缓存事件 CSV" aria-label="导出界面缓存事件 CSV"><i data-lucide="download"></i></button>
+                  <span class="analysis-mode-chip" id="spike-detector-state">检测未启用</span>
+                </div>
+              </header>
+              <details class="spike-config" open>
+                <summary>检测与连续记录</summary>
+                <div id="spike-config">
+                  <label class="spike-check"><input type="checkbox" id="spike-enabled">全通道检测</label>
+                  <label>阈值模式<select id="spike-threshold-mode"><option value="noise" selected>噪声倍数 · MAD</option><option value="fixed">固定微伏</option></select></label>
+                  <label>方向<select id="spike-polarity"><option value="-1" selected>负向</option><option value="1">正向</option></select></label>
+                  <label>噪声倍数 / σ<input id="spike-noise-multiplier" type="number" min="2" max="12" step="0.5" value="5"></label>
+                  <label>校准 / s<input id="spike-calibration" type="number" min="0.25" max="10" step="0.25" value="1"></label>
+                  <label>固定阈值 / µV<input id="spike-threshold" type="number" min="-6000" max="6000" step="1" value="-50"></label>
+                  <label>不应期 / ms<input id="spike-refractory" type="number" min="0.5" max="100" step="0.1" value="3"></label>
+                  <label>前窗 / ms<input id="spike-pre" type="number" min="0.2" max="3" step="0.1" value="1"></label>
+                  <label>后窗 / ms<input id="spike-post" type="number" min="0.5" max="5" step="0.1" value="2"></label>
+                  <label class="spike-check"><input type="checkbox" id="spike-band-pass" checked>300–3000 Hz</label>
+                  <label class="spike-check"><input type="checkbox" id="spike-record">连续 CSV</label>
+                  <input id="spike-record-path" aria-label="连续尖峰记录文件路径" class="spike-path">
+                  <button id="spike-apply" title="应用检测设置，停止采集后可修改"><i data-lucide="check"></i>应用</button>
+                </div>
+              </details>
+              <div class="spike-summary">
+                <span><small>累计 / 窗口事件</small><strong id="spike-event-count">0</strong></span>
+                <span><small>活动通道</small><strong id="spike-active-channels">0</strong></span>
+                <span><small>最高事件率</small><strong id="spike-peak-rate">0.00 Hz</strong></span>
+                <span><small>最新采样点</small><strong id="spike-latest-sample">—</strong></span>
+                <span><small>阈值状态</small><strong id="spike-threshold-summary">等待校准</strong></span>
+              </div>
+              <div class="spike-raster-shell">
+                <div class="spike-raster" id="spike-raster" aria-label="阈值事件时间栅格"></div>
+                <div id="spike-waveforms" class="spike-waveforms" hidden></div>
+                <table id="spike-values" class="spike-values" hidden><thead><tr><th>通道</th><th>Stream:CH</th><th>越阈采样点</th><th>时间 / s</th><th>峰值 / µV</th><th>峰峰值 / µV</th><th>阈值 / µV</th><th>噪声 σ / µV</th></tr></thead><tbody id="spike-values-body"></tbody></table>
+                <div class="spike-empty" id="spike-empty"><i data-lucide="scan-line"></i><strong>暂无阈值事件</strong><span id="spike-empty-status">阈值检测当前未启用</span></div>
+              </div>
+              <footer class="spike-footer"><div class="spike-axis"><span id="spike-axis-start">0 s</span><span id="spike-axis-end">0 s</span></div><p id="spike-record-status" role="status">检测未启用</p></footer>
+            </div>
+
+            <div class="view-panel spectrum-view" id="spectrum-view">
+              <header class="analysis-heading">
+                <div><span class="eyebrow">FREQUENCY DOMAIN</span><strong>频谱与时频图</strong></div>
+                <div class="analysis-toolbar">
+                  <button id="spectrum-return-waveform" class="focus-fit-waveform channel-analysis-return" hidden title="返回当前通道波形"><i data-lucide="arrow-left"></i>返回通道波形</button>
+                  <label><span>通道</span><select id="spectrum-channel"></select></label>
+                  <label><span>频率范围</span><select id="spectrum-range"><option value="0">自动</option><option value="300">300 Hz</option><option value="1000">1 kHz</option><option value="3000">3 kHz</option><option value="7500">7.5 kHz</option></select></label>
+                </div>
+              </header>
+              <section class="frequency-panel">
+                <div class="analysis-panel-heading"><span>功率频谱</span><div><strong id="spectrum-peak">—</strong><small id="spectrum-resolution">—</small></div></div>
+                <canvas id="spectrum-canvas" aria-label="功率频谱"></canvas>
+              </section>
+              <section class="frequency-panel spectrogram-panel">
+                <div class="analysis-panel-heading"><span>时频图</span><div><strong id="spectrogram-window">—</strong><small>最新数据在右侧</small></div></div>
+                <canvas id="spectrogram-canvas" aria-label="时频图"></canvas>
+              </section>
+            </div>
+
+            <div class="view-panel statistics-view" id="statistics-view">
+              <header class="analysis-heading">
+                <div><span class="eyebrow">EVENT ANALYSIS</span><strong>尖峰统计与片段</strong></div>
+                <div class="analysis-toolbar">
+                  <button id="statistics-return-waveform" class="focus-fit-waveform channel-analysis-return" hidden title="返回当前通道波形"><i data-lucide="arrow-left"></i>返回通道波形</button>
+                  <label><span>通道</span><select id="statistics-channel"></select></label>
+                  <label><span>ISI 范围</span><select id="isi-range"><option value="100">100 ms</option><option value="250">250 ms</option><option value="500" selected>500 ms</option><option value="1000">1 s</option></select></label>
+                </div>
+              </header>
+              <div class="statistics-grid">
+                <section>
+                  <div class="analysis-panel-heading"><span>ISI 直方图</span><div><strong id="isi-count">0 intervals</strong><small id="isi-median">中位数 —</small></div></div>
+                  <canvas id="isi-canvas" aria-label="尖峰间隔直方图"></canvas>
+                </section>
+                <section>
+                  <div class="analysis-panel-heading"><span>PSTH</span><div><strong id="psth-triggers">0 triggers</strong><small>−0.5 s 至 +1 s</small></div></div>
+                  <canvas id="psth-canvas" aria-label="刺激后时间直方图"></canvas>
+                </section>
+                <section class="snippet-panel">
+                  <div class="analysis-panel-heading"><span>尖峰波形片段</span><div><strong id="snippet-count">0 snippets</strong><small>阈值事件对齐</small></div></div>
+                  <canvas id="snippet-canvas" aria-label="尖峰波形片段"></canvas>
+                </section>
+              </div>
+            </div>
+
+            <div class="view-panel device-tools-view" id="device-tools-view">
+              <section class="device-tool-section impedance-tool">
+                <div class="device-tool-heading"><div><span class="eyebrow">IMPEDANCE</span><strong>电极阻抗</strong></div><span class="impedance-heading-actions"><span id="impedance-profile-name"></span><span class="analysis-mode-chip" id="impedance-state">IDLE</span><button class="icon-button dark-tool" id="expand-impedance" title="展开阻抗结果" aria-pressed="false"><i data-lucide="maximize-2"></i></button></span></div>
+                <div class="device-tool-controls">
+                  <label><span>频率</span><input id="impedance-frequency" type="number" min="10" max="2000" value="1000" /><small>Hz</small></label>
+                  <button class="secondary-command" id="prepare-impedance"><i data-lucide="scan-line"></i>开始测量</button>
+                  <button class="icon-button subtle" id="cancel-impedance" title="取消阻抗任务" disabled><i data-lucide="x"></i></button>
+                  <button class="icon-button subtle" id="export-impedance" title="导出阻抗 CSV" disabled><i data-lucide="download"></i></button>
+                </div>
+                <label class="impedance-confirmation"><input type="checkbox" id="impedance-confirmed" />允许向电极注入阻抗测试交流信号</label>
+                <div class="device-tool-status" id="impedance-progress">实际频率 — · 0/0 通道</div>
+                <div class="impedance-map-scroll"><div class="impedance-results" id="impedance-results" aria-label="电极阻抗阵列"></div></div>
+                <div class="device-tool-status" id="impedance-message">未创建阻抗任务</div>
+              </section>
+              <section class="device-tool-section audio-tool">
+                <div class="device-tool-heading"><div><span class="eyebrow">AUDIO MONITOR</span><strong>信号监听</strong></div><span class="analysis-mode-chip" id="audio-state">OFF</span></div>
+                <div class="audio-monitor-controls">
+                  <label><span>通道</span><select id="audio-channel"></select></label>
+                  <label><span>增益</span><input id="audio-gain" type="range" min="0" max="4" step="0.1" value="0.5" /><output id="audio-gain-label">0.5×</output></label>
+                  <button class="secondary-command" id="toggle-audio"><i data-lucide="volume-2"></i><span>开启</span></button>
+                </div>
+                <div class="audio-level"><i id="audio-level-meter"></i></div>
+                <div class="device-tool-status"><span id="audio-channel-state">CH-01</span><span>限幅保护启用</span></div>
+              </section>
+            </div>
+
             <div class="view-panel performance-view" id="performance-view">
+              <header class="performance-toolbar">
+                <div><span class="eyebrow">SYSTEM HEALTH</span><strong>运行诊断</strong></div>
+                <div><span id="diagnostic-summary">等待状态数据</span><button class="secondary-command" id="export-diagnostics"><i data-lucide="file-down"></i>导出诊断</button></div>
+              </header>
               <div class="performance-grid">
                 <article class="metric-module"><span>采集样本</span><strong id="perf-samples">0</strong><small>per channel</small></article>
                 <article class="metric-module"><span>接收数据</span><strong id="perf-bytes">0 B</strong><small>FrontPanel stream</small></article>
@@ -177,7 +412,7 @@
               <header class="game-view-heading">
                 <div>
                   <span class="eyebrow">GAME CHANNEL MAP</span>
-                  <strong id="game-profile-name">RHS2116</strong>
+                  <strong id="game-profile-name">16 通道</strong>
                 </div>
                 <div class="game-map-stats">
                   <span><small>阵列</small><strong id="game-array-size">4×4</strong></span>
@@ -198,17 +433,79 @@
           </div>
         </section>
 
-        <aside class="right-panel">
+        <aside class="right-panel" id="right-panel">
           <section class="panel-section acquisition-section">
             <div class="section-heading"><div><span class="eyebrow">SESSION</span><h2>采集</h2></div><span class="mode-chip" id="mode-chip">IDLE</span></div>
             <div class="two-column-fields">
               <label class="field"><span>批量块数</span><input id="blocks-per-read" type="number" min="1" max="32" value="8" /></label>
               <label class="field"><span>队列容量</span><input id="queue-capacity" type="number" min="1" max="128" value="8" /></label>
             </div>
+            <div class="experiment-box">
+              <div class="experiment-title"><span><i data-lucide="flask-conical"></i>实验方案</span><strong id="experiment-saved-count">0</strong></div>
+              <div class="experiment-actions">
+                <select id="experiment-preset" aria-label="实验方案"><option value="">未保存方案</option></select>
+                <button class="icon-button subtle" id="load-experiment" title="载入实验方案" disabled><i data-lucide="folder-open"></i></button>
+                <button class="icon-button subtle" id="save-experiment" title="保存实验方案"><i data-lucide="save"></i></button>
+                <button class="icon-button subtle" id="delete-experiment" title="删除实验方案" disabled><i data-lucide="trash-2"></i></button>
+              </div>
+            </div>
+            <details class="session-metadata-box" open>
+              <summary><span><i data-lucide="clipboard-pen-line"></i>会话信息</span><strong id="recovery-status">自动保存</strong></summary>
+              <div class="session-metadata-grid">
+                <label class="field"><span>实验名称</span><input id="session-name" maxlength="80" autocomplete="off" /></label>
+                <label class="field"><span>操作者</span><input id="session-operator" maxlength="80" autocomplete="off" /></label>
+                <label class="field"><span>对象编号</span><input id="session-subject" maxlength="80" autocomplete="off" /></label>
+                <label class="field session-notes"><span>备注</span><textarea id="session-notes" maxlength="4000" rows="2"></textarea></label>
+              </div>
+            </details>
             <div class="recording-box">
               <div class="recording-title"><span><i data-lucide="database"></i>原始记录</span><strong id="record-status">OFF</strong></div>
+              <label class="recording-name-option"><input id="recording-auto-name" type="checkbox" checked />日期时间自动命名</label>
               <label class="field"><span>文件</span><input id="recording-path" autocomplete="off" /></label>
-              <div class="storage-caption"><span>RHSRAW v1</span><span id="record-blocks">0 blocks</span></div>
+              <div class="storage-caption"><span>起始参数 + 原始数据</span><span id="record-blocks">0 blocks</span></div>
+            </div>
+            <details class="trigger-recording-box" open>
+              <summary><span><i data-lucide="timer-reset"></i>触发记录</span><strong id="trigger-recording-status">IDLE</strong></summary>
+              <label class="recording-name-option"><input id="trigger-recording-auto-name" type="checkbox" checked />Arm 时按日期时间命名</label>
+              <label class="field"><span>文件</span><input id="trigger-recording-path" autocomplete="off" /></label>
+              <div class="trigger-recording-grid">
+                <label class="field"><span>触发源</span><select id="trigger-recording-source">
+                  <option value="software">软件</option>
+                  <option value="digital">数字输入</option>
+                  <option value="analog">模拟通道</option>
+                </select></label>
+                <label class="field"><span>预触发</span><input id="pre-trigger-ms" type="number" min="0" max="30000" step="100" value="1000" /></label>
+                <label class="field"><span>后触发</span><input id="post-trigger-ms" type="number" min="1" max="3600000" step="100" value="5000" /></label>
+                <label class="field trigger-source-field digital-trigger-field" hidden><span>DIN 掩码</span><input id="digital-trigger-mask" type="number" min="1" max="65535" value="1" /></label>
+                <label class="field trigger-source-field analog-trigger-field" hidden><span>模拟通道</span><input id="analog-trigger-channel" type="number" min="1" max="120" value="1" /></label>
+                <label class="field trigger-source-field analog-trigger-field" hidden><span>阈值</span><input id="analog-trigger-threshold" type="number" min="0" max="65535" value="40000" /></label>
+                <label class="field trigger-source-field analog-trigger-field" hidden><span>方向</span><select id="analog-trigger-direction"><option value="rising-above">向上越过</option><option value="falling-below">向下越过</option></select></label>
+              </div>
+              <div class="trigger-recording-actions">
+                <button class="secondary-command" id="arm-trigger-recording" disabled><i data-lucide="shield-check"></i>Arm</button>
+                <button class="trigger-command" id="fire-recording-trigger" disabled><i data-lucide="radio"></i>Trigger</button>
+                <button class="icon-button subtle" id="cancel-trigger-recording" title="取消触发记录" disabled><i data-lucide="x"></i></button>
+              </div>
+              <div class="storage-caption"><span id="trigger-recording-source-label">软件触发</span><span id="trigger-recording-count">0 blocks</span></div>
+            </details>
+            <div class="playback-box">
+              <div class="recording-title"><span><i data-lucide="folder-clock"></i>记录回放</span><strong id="playback-status">CLOSED</strong></div>
+              <label class="field"><span>原始记录文件</span><input id="playback-path" autocomplete="off" /></label>
+              <button class="secondary-command" id="open-analysis-export"><i data-lucide="file-output"></i>导出完整记录</button>
+              <div class="playback-actions">
+                <button class="icon-button subtle" id="open-playback" title="打开记录"><i data-lucide="folder-open"></i></button>
+                <button class="icon-button subtle" id="playback-toggle" title="播放" disabled><i data-lucide="play"></i></button>
+                <button class="icon-button subtle" id="close-playback" title="关闭记录" disabled><i data-lucide="x"></i></button>
+                <label><span>速度</span><select id="playback-speed" disabled>
+                  <option value="0.25">0.25×</option>
+                  <option value="0.5">0.5×</option>
+                  <option value="1" selected>1×</option>
+                  <option value="2">2×</option>
+                  <option value="4">4×</option>
+                </select></label>
+              </div>
+              <input class="playback-timeline" id="playback-position" type="range" min="0" max="1000" value="0" disabled aria-label="回放位置" />
+              <div class="storage-caption"><span id="playback-time">00:00.000</span><span id="playback-duration">00:00.000</span></div>
             </div>
           </section>
 
@@ -219,7 +516,7 @@
             </div>
             <div class="safety-banner">
               <i data-lucide="shield-alert"></i>
-              <div><strong>台架验证待完成</strong><span>真实 Arm 与 Trigger 已锁定</span></div>
+              <div><strong id="stim-safety-title">真实输出已锁定</strong><span id="stim-safety-detail">未确认台架条件</span></div>
             </div>
             <button class="stim-config-command" id="open-stim-config">
               <span><i data-lucide="layout-grid"></i><strong>配置通道与参数</strong></span>
@@ -231,26 +528,38 @@
               <div><span>脉冲</span><strong id="stim-pulse-summary">1</strong></div>
               <div><span>相宽</span><strong id="stim-width-summary">200 µs</strong></div>
             </div>
-            <div class="stim-actions">
-              <button class="secondary-command" disabled><i data-lucide="shield"></i>Arm</button>
-              <button class="trigger-command" disabled><i data-lucide="zap"></i>Trigger</button>
+            <div id="stim-programmed-summary" class="stim-programmed-summary" hidden></div>
+            <div class="stim-schedule-grid">
+              <label class="field"><span>延迟 · ms</span><input id="stim-delay" type="number" min="0" max="3600000" step="10" value="0" /></label>
+              <label class="field"><span>重复次数</span><input id="stim-repeat-count" type="number" min="1" max="1000" step="1" value="1" /></label>
+              <label class="field"><span>重复间隔 · ms</span><input id="stim-repeat-interval" type="number" min="0" max="3600000" step="10" value="1000" /></label>
             </div>
-            <div class="stim-state-row"><span>输出状态</span><strong><span class="status-dot safe"></span>DISABLED</strong></div>
+            <div class="stim-bench-confirmations">
+              <div class="field"><span>输出模式</span><select id="stim-validation-mode" aria-label="刺激输出模式"><option value="measured">假负载测量</option><option value="functional">无生物样本单次联调</option><option value="functional-repeat">无生物样本重复联调 · 最多 3 次</option><option value="configurable">可配置真实输出 · 研究用途</option></select></div>
+              <label><input id="stim-real-output" type="checkbox" />确认真实硬件输出</label>
+              <label id="stim-disconnected-confirmation"><input id="stim-sample-disconnected" type="checkbox" />已断开生物样本</label>
+              <div id="stim-measured-confirmations">
+              <label><input id="stim-dummy-load" type="checkbox" />所选通道已接假负载</label>
+              <label><input id="stim-measurement-ready" type="checkbox" />测量设备已就绪</label>
+              </div>
+              <div id="stim-configurable-confirmations" hidden>
+                <label><input id="stim-routing-confirmed" type="checkbox" />已核对通道与回流连接</label>
+                <label><input id="stim-parameters-confirmed" type="checkbox" />已核对参数与实验方案</label>
+                <label><input id="stim-unverified-acknowledged" type="checkbox" />知晓实际输出及样本适用性尚未验收</label>
+              </div>
+            </div>
+            <div class="stim-actions">
+              <button class="secondary-command" id="arm-stimulation" disabled><i data-lucide="shield"></i>Arm</button>
+              <button class="trigger-command" id="trigger-stimulation" disabled><i data-lucide="zap"></i>Trigger</button>
+              <button class="secondary-command" id="cancel-stimulation" disabled><i data-lucide="ban"></i>Cancel</button>
+              <button class="secondary-command" id="disarm-stimulation" disabled><i data-lucide="shield-off"></i>Disarm</button>
+            </div>
+            <div class="stim-state-row"><span>输出状态</span><strong><span class="status-dot safe"></span><span id="stim-state-label">DISARMED</span></strong></div>
+            <div class="storage-caption"><span id="stim-output-mode">INTERLOCKED</span><span id="stim-command-count">0 pending</span></div>
+            <div class="stim-audit-path" id="stim-audit-path"></div>
           </section>
         </aside>
 
-        <section class="event-console">
-          <div class="console-heading">
-            <div class="console-title"><i data-lucide="list-tree"></i><strong>事件</strong><span id="event-count">0</span></div>
-            <div class="console-filters">
-              <button class="filter-chip active" data-level="all">全部</button>
-              <button class="filter-chip" data-level="error">错误</button>
-              <button class="icon-button subtle" id="clear-events" title="清空界面事件"><i data-lucide="trash-2"></i></button>
-              <button class="icon-button subtle" id="toggle-console" title="折叠事件面板"><i data-lucide="chevron-down"></i></button>
-            </div>
-          </div>
-          <div class="event-log" id="event-log" role="log"></div>
-        </section>
       </main>
       <div class="toast-region" id="toast-region" aria-live="polite"></div>
     </div>
@@ -270,12 +579,28 @@
         </div>
       </form>
     </dialog>
+    <dialog class="pipeline-dialog" id="experiment-preset-dialog">
+      <form id="experiment-preset-form">
+        <div class="dialog-heading">
+          <div class="dialog-symbol"><i data-lucide="flask-conical"></i></div>
+          <div><strong>保存实验方案</strong><span>设备布局、处理链、刺激与采集设置</span></div>
+        </div>
+        <label class="field">
+          <span>方案名称</span>
+          <input id="experiment-preset-name" maxlength="40" autocomplete="off" required />
+        </label>
+        <div class="dialog-actions">
+          <button type="button" class="secondary-command" id="cancel-experiment-preset">取消</button>
+          <button type="submit" class="primary-command"><i data-lucide="save"></i>保存</button>
+        </div>
+      </form>
+    </dialog>
     <dialog class="stim-config-dialog" id="stim-config-dialog">
       <form id="stim-config-form">
         <header class="stim-dialog-heading">
           <div>
             <span class="dialog-symbol"><i data-lucide="waypoints"></i></span>
-            <div><strong>MEA 多通道刺激配置</strong><span id="stim-dialog-profile">RHS2116 · 4×4</span></div>
+            <div><strong>MEA 多通道刺激配置</strong><span id="stim-dialog-profile">16 通道 · 4×4</span></div>
           </div>
           <button type="button" class="icon-button subtle" id="close-stim-config" title="关闭"><i data-lucide="x"></i></button>
         </header>
@@ -314,7 +639,7 @@
               <label class="field"><span>脉冲数</span><input id="stim-pulse-count" type="number" min="1" max="10000" step="1" /></label>
             </div>
             <label class="charge-recovery-row">
-              <span><strong>电荷恢复</strong><small>Charge recovery</small></span>
+              <span><strong>双相电荷平衡</strong><small>Balanced biphasic</small></span>
               <input id="stim-charge-recovery" type="checkbox" />
               <span class="switch" aria-hidden="true"></span>
             </label>
@@ -331,6 +656,47 @@
             <button type="submit" class="primary-command"><i data-lucide="save"></i>保存配置</button>
           </div>
         </footer>
+      </form>
+    </dialog>
+    <dialog class="channel-editor-dialog" id="channel-editor-dialog">
+      <form id="channel-editor-form">
+        <header class="stim-dialog-heading">
+          <div><span class="dialog-symbol"><i data-lucide="table-properties"></i></span><div><strong>通道与阵列编辑</strong><span id="channel-editor-profile">16 通道</span></div></div>
+          <button type="button" class="icon-button subtle" id="close-channel-editor" title="关闭"><i data-lucide="x"></i></button>
+        </header>
+        <div class="channel-editor-toolbar">
+          <button type="button" class="secondary-command" id="enable-all-channels"><i data-lucide="circle-check-big"></i>全部启用</button>
+          <button type="button" class="secondary-command" id="disable-all-channels"><i data-lucide="circle-off"></i>全部禁用</button>
+          <button type="button" class="secondary-command" id="reset-channel-settings"><i data-lucide="rotate-ccw"></i>恢复默认</button>
+          <span id="channel-editor-count">16 / 16</span>
+        </div>
+        <div class="channel-editor-table">
+          <div class="channel-editor-row channel-editor-header"><span>启用</span><span>硬件 ID</span><span>显示名称</span><span>颜色</span><span>行</span><span>列</span></div>
+          <div id="channel-editor-rows"></div>
+        </div>
+        <footer class="stim-dialog-actions">
+          <span><i data-lucide="layout-grid"></i>位置按当前 MEA 阵列保存</span>
+          <div><button type="button" class="secondary-command" id="cancel-channel-editor">取消</button><button type="submit" class="primary-command"><i data-lucide="save"></i>应用</button></div>
+        </footer>
+      </form>
+    </dialog>
+    <dialog class="pipeline-dialog export-dialog" id="export-dialog">
+      <form id="export-form">
+        <div class="dialog-heading"><div class="dialog-symbol"><i data-lucide="download"></i></div><div><strong>导出会话与分析摘要</strong><span>当前会话、通道、事件和分析摘要</span></div></div>
+        <button type="button" class="secondary-command" id="summary-open-analysis-export"><i data-lucide="file-output"></i>导出完整原始记录</button>
+        <label class="field"><span>文件名</span><input id="export-filename" maxlength="80" autocomplete="off" required /></label>
+        <label class="field"><span>格式</span><select id="export-format"><option value="json">JSON 会话摘要</option><option value="csv">CSV 事件表</option><option value="html">HTML 实验报告</option><option value="xls">Excel 工作簿</option></select></label>
+        <div class="dialog-actions"><button type="button" class="secondary-command" id="cancel-export">取消</button><button type="submit" class="primary-command"><i data-lucide="download"></i>导出</button></div>
+      </form>
+    </dialog>
+    <dialog class="pipeline-dialog export-dialog" id="analysis-export-dialog">
+      <form id="analysis-export-form">
+        <div class="dialog-heading"><div class="dialog-symbol"><i data-lucide="file-output"></i></div><div><strong>导出完整原始记录</strong><span>全采样率 · 未经过软件滤波</span></div></div>
+        <label class="field"><span>原始记录文件</span><input id="analysis-export-source" autocomplete="off" required /></label>
+        <label class="field"><span>输出目录（新建）</span><input id="analysis-export-directory" autocomplete="off" required /></label>
+        <label class="field"><span>格式</span><select id="analysis-export-format"><option value="binary">二进制 + JSON + Python / MATLAB 读取脚本</option><option value="csv">CSV 微伏数据 + 二进制 + JSON + 读取脚本</option></select></label>
+        <output id="analysis-export-result" role="status"></output>
+        <div class="dialog-actions"><button type="button" class="secondary-command" id="cancel-analysis-export">关闭</button><button type="submit" class="primary-command" id="submit-analysis-export"><i data-lucide="download"></i>导出</button></div>
       </form>
     </dialog>
   </body>

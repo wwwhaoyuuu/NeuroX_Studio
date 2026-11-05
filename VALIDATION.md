@@ -1,5 +1,35 @@
 # RHS Rust Control 验证记录
 
+## 2026-10-30 - Full recording analysis export, offline only
+
+- Added a full-recording export command and desktop dialog, separate from session
+  summaries. Exports stream raw samples at full rate, physical channel addresses,
+  original sample indices, TTL availability, block flags and recording parameters.
+  Optional CSV contains microvolts. Original recordings are opened read-only.
+- Native release tests: 63 passed, including three new export tests covering 16/64
+  channels, legacy metadata, time gaps, missing TTL, CRC corruption, incomplete
+  sources and refusal to overwrite existing destinations. Eleven frontend test
+  groups passed. Browser checks covered dialog layout, source/destination linkage
+  and preview refusal to fabricate a real file export.
+- Three Python reader tests passed, including reading an actual native-exported
+  64-channel fixture, ADC/microvolt conversion, sample indices and incomplete-file
+  rejection. MATLAB R2019a could not start in either of two headless attempts;
+  the MATLAB helper is provided but runtime verification is NOT claimed.
+- No acquisition, impedance measurement or stimulation command was sent. Low disk
+  space blocked the initial debug build; release-cache builds completed. Existing
+  recordings were neither renamed nor rewritten.
+
+## 2026-09-30 - MEA 64 stimulation routing, offline only
+
+- The frontend requires exactly four distinct 16-channel RHS2116 streams: two on port B and two on port C. A separately verified B/C 16-channel group-to-stream order is required to build the 64-electrode route map.
+- Synthetic tests cover all 64 unique physical addresses, selected-electrode resolution, wrong-port routes, duplicate addresses, missing streams and invalid group assignments. `npm test` and `npm run build` passed.
+- The stream order for the connected 64-channel assembly has not yet been supplied in this validation record. The native acquisition and stimulation adapters still target one RHS2116 stream. No 64-channel hardware pulse or measured output is claimed; the desktop remains interlocked.
+
+## 2026-09-30 - Explicit single-stream targeting on four-chip scans
+
+- The native direct-stimulation session can now open a specific detected RHS2116 by port and command stream instead of implicitly choosing the first chip. Auxiliary magnitude commands are limited to that target stream. The guarded CLI requires explicit serial, port, stream and chip channel and accepts either one RHS2116 or a B/C two-plus-two four-chip scan.
+- The CLI still stimulates only one physical channel per finite command. This is addressability groundwork, not simultaneous multichannel output or a 64-channel acquisition implementation. All workspace Rust tests and frontend route tests passed; physical output and the connected board's stream order remain unverified.
+
 ## 2026-08-18 - Iteration 1
 
 ### 验证范围
@@ -535,3 +565,544 @@ Rust 测试覆盖节点顺序、多 threshold 接收器、重复 ID、未知版�
 - 运行中频繁重建复杂管线时的真实硬件负载测试；
 - 文件导入/导出和跨电脑方案迁移；当前方案保存在本机应用存储；
 - 动态第三方插件；当前评估为不需要，未来如引入必须增加进程隔离和单独安全评审。
+
+## 2026-09-04 - Unicode bitfile and current hardware path
+
+- Windows FrontPanel driver enumerated an Opal Kelly XEM7310 (serial redacted, firmware 1.30).
+- Replaced the filename-based FPGA upload with Unicode-safe file reading followed by
+  `ConfigureFPGAFromMemory`; no FPGA or Verilog content was changed.
+- The 2024 RHS bitfile loaded successfully and reported Rhythm version 1.
+- Scan detected one RHS2116 on port A, command stream 0, with 16 channels.
+- A two-second read-only acquisition produced 59 blocks and 60,416 samples per channel at
+  29,925.6 samples/s, with zero timestamp gaps and zero queue overflows.
+- A subsequent three-second signal-quality capture again had zero timestamp gaps and zero
+  queue overflows. All 16 channels touched at least one 16-bit ADC rail and all 16 had a
+  correlation of at least 0.95 with the channel common mode. This confirms that the
+  periodic display waveform is present in the raw samples and is consistent with an
+  unterminated/reference-deficient analog input, not a WebView rendering artifact.
+- Stimulation remained disabled for the entire scan and acquisition check.
+
+## 2026-09-30 - RHS2116 stimulation readiness check
+
+- The desktop maps `CH-01` through `CH-16` exactly to physical chip channels 0 through 15;
+  malformed and out-of-range labels are rejected before software Arm.
+- Desktop tests: 20 passed. Device, runtime and stimulation safety tests: 11, 3 and 12 passed.
+- `stim-session-check` found one RHS2116 on port A, stream 0. Session open, idle cancel and
+  close passed with output disabled and USB pipe error 0.
+- `sync-session-check` preloaded the fixed bench preset and acquired 60,416 samples per
+  channel in 59 blocks. It reported zero timestamp gaps, queue overflows, stimulation
+  events and FPGA `stim_on` markers. No trigger command was sent.
+- The desktop acquisition request still sets `stimulation: None`, and its Arm/Trigger
+  workflow remains interlocked. The native bridge currently programs one RHS2116
+  channel per preset; selecting multiple channels in the desktop does not program
+  multiple physical outputs.
+- The test-load pulse shape, current, phase timing and active Emergency Stop latency
+  remain unmeasured. This check does not qualify real stimulation for distribution.
+- The guarded CLI bench entry now accepts `--channel 1..16` and maps it to chip channels
+  0..15. All 16 addresses and both out-of-range boundaries passed unit tests. An actual
+  invocation using channel 16 without the two physical confirmations was rejected before
+  opening the device. No per-channel output waveform has been measured.
+
+## 2026-09-30 - 16-channel preset preload, no trigger
+
+- Added a 16-bit RHS2116 channel mask to the native acquisition stimulation configuration.
+  The direct bounded stimulation session remains restricted to one channel.
+- Desktop acquisition can preload the selected RHS2116 channels when the request matches
+  the fixed 10 nA biphasic bench pulse or train. Custom waveforms and magnitudes are rejected
+  for hardware preload; desktop Arm/Trigger remain interlocked software operations.
+- On the connected port A RHS2116, `sync-session-check --channel-mask 0xffff` configured all
+  16 channels and acquired 59 blocks / 60,416 samples per channel without sending a trigger.
+  There were zero `stim_on` markers, stimulation events, timestamp gaps, or queue overflows.
+- After closing RHS Studio, the same 16-channel no-trigger check passed again on
+  serial [redacted]. `stim-session-check` also passed: idle cancel left output disabled,
+  USB pipe error was 0, and the session reported inactive before close.
+- Desktop tests passed (22), along with device/runtime/CLI tests. Actual current, phase width,
+  channel isolation, compliance and Emergency Stop timing under load remain unmeasured.
+  The desktop's charge-recovery toggle is not evidence that active charge-recovery timing
+  has been programmed or validated in the RHS2116; the fixed bench waveform is balanced
+  biphasic, but active recovery requires separate implementation and measurement.
+
+## 2026-10-09 - Intan channel numbering and stimulation sequence comparison
+
+- A scan earlier in this session detected four RHS2116 chips on a local unit (serial redacted):
+  port B command streams 2/3 and port C command streams 4/5, with 32 channels per port
+  and USB pipe error 0. All four targeted session-open/idle-cancel/close checks passed
+  with stimulation output disabled.
+- Compared the supplied RHX `ControllerInterface::addAmplifierChannels` and
+  `setStimSequenceParameters` against the vendored Intan scan/controller API.
+  RHX assigns port-local amplifier numbers in ascending command-stream order.
+  Thus B-000..015 uses stream 2, B-016..031 stream 3, C-000..015 stream 4,
+  and C-016..031 stream 5 for this scan. Chip channels are port-channel modulo 16.
+  The probe routing module can now derive this order without a separately supplied
+  stream-group table; the workbook still defines electrode-site positions.
+- Fixed a direct stimulation-session defect: configuration disabled its trigger but
+  the start path never enabled it. Explicit start now clears the manual trigger and
+  enables the selected channel; completion/cancel disables all 16 trigger sequencers
+  on that selected chip.
+- Centralized the three native timing-programming paths. Nonzero interphase delay now
+  uses `BiphasicWithInterphaseDelay` and sets the second-phase-start event, matching RHX.
+  Zero-gap waveforms use `Biphasic`; all twelve timing events are explicitly written.
+- `scripts/test-native-stim.bat` passed using a simulated controller: 64 independent
+  addresses, both waveform shapes, single/train event timing, explicit enable and stop.
+  All 93 Rust workspace tests, rustfmt, Clippy with warnings denied, and the frontend
+  stimulation routing test passed. These are software tests, not output measurements.
+- Attempted to open the existing RHX executable. Its first launch exposed a
+  Configuration File Error, subsequent launches exposed no targetable RHX window,
+  and Task Manager capture timed out. Process termination from the shell was denied.
+  The live RHX device and stimulation screens were therefore not inspected this turn.
+- No physical stimulation trigger was sent. The desktop acquisition still selects one
+  16-channel chip; the automatic 64-channel routing module is not yet integrated with
+  a four-chip acquisition/stimulation desktop workflow. Real pulse current/timing and
+  simultaneous four-chip acquisition remain unverified.
+
+## 2026-10-09 - Unified 64-channel desktop bench implementation
+
+- Supersedes the single-stream desktop limitation noted above. Acquisition now
+  supports either one 16-channel chip or exactly streams 2/3/4/5 for 64 channels.
+  Physical channel IDs, block sizing, amplifier/DC parsing and 64-bit stimulation
+  and compliance feedback use the actual enabled streams.
+- Hardware preset conversion maps every B/C address to its chip and channel.
+  Native configuration programs selected channels on each chip; Trigger enables
+  the selected sequencers and asserts their common manual trigger. Continuous
+  monitor commands preserve programmed magnitudes and DAC step size.
+- Added custom representable current and quantized timing for shared symmetric
+  negative-first biphasic sequences. Triphasic and active charge recovery remain
+  unsupported. The UI label now says balanced biphasic, not active recovery.
+- Desktop hardware Arm requires exact preloaded parameters, verified chip layout,
+  operator identity and explicit dummy-load bench confirmations. Arm expires in
+  60 seconds. Cancel/Disarm/Emergency Stop latch hardware output off until restart.
+- Bounded atomic queue submission, selected-channel compliance checks, all-selected
+  channel stim-on completion, timestamp-gap shutdown and flushed JSONL audit were
+  added. Browser preview cannot enable real output.
+- 99 Rust workspace tests and all seven frontend test groups passed; Clippy passed
+  with warnings denied. Native simulated-controller tests passed for all 64
+  independent addresses, all-channel enable, selective enable and finite timing.
+- Browser inspection confirmed 64 electrode buttons, the probe-site layout,
+  desktop dialog bounds and disabled real-output control in preview. The standalone
+  Edge screenshot harness could not start its DevTools endpoint in this environment;
+  its automated screenshot checks were not reported as passing.
+- No physical trigger was sent during this implementation. Simultaneous four-chip
+  acquisition, load current, pulse timing, channel isolation, compliance behavior
+  under load and active stop latency still need hardware measurements. This is a
+  bench-validation release, not a qualified biological-use or full RHX-parity release.
+
+## 2026-10-09 - Installed client and live no-trigger verification
+
+- Replaced the local installed executable, bitfile and runtime DLLs with the bench
+  build, after backing up the previous installation. Desktop and Start menu links
+  now target the installed executable directly; read-back target paths and installed
+  file hashes were verified.
+- The installed native client loaded its embedded `http://tauri.localhost/` frontend
+  without a port-1420 server. Accessibility text showed MEA 64, four waveform pages,
+  IDLE, DISARMED and INTERLOCKED. The user confirmed the visible interface looked
+  normal. Windows screenshot capture timed out and pointer input lacked geometry;
+  automated native click/screenshot testing was not completed.
+- Fixed an acquisition-start bug where selecting no stimulation channels still
+  attempted to preload an invalid empty preset. Empty selection now starts acquisition
+  without a stimulation preset; selected 16/64-channel presets still preload normally.
+  Regression checks cover both profiles and unsupported 120-channel preload.
+- Added read-only CLI `--channels 16|64` diagnostics and `sync64-session-check`.
+  The same acquisition worker/native bridge as the desktop was tested on serial
+  the same local unit (serial redacted), detecting exactly B2/B3/C4/C5 and USB pipe error 0.
+- Five-second 64-channel acquisition read 146 blocks and 149,504 samples per channel,
+  with observed rate 29,895.2 samples/second/channel, zero timestamp gaps and zero
+  queue overflows. Open-input data showed strong approximately 50 Hz interference
+  and rail saturation; this was not a biological signal quality validation.
+- A real four-chip configuration check preloaded the fixed 10 nA balanced biphasic
+  preset onto all 64 addresses without scheduling a trigger. Subsequent acquisition
+  read 59 blocks / 60,416 samples per channel, with zero stim-artifact blocks,
+  stimulation events, timestamp gaps and queue overflows.
+- 100 Rust workspace tests and all frontend test groups passed after the correction.
+  These checks validate acquisition and disabled-output preset programming, not
+  delivered current, pulse timing, electrode isolation or loaded stop latency.
+
+## 2026-10-22 - B/C selection on an eight-stream board
+
+- A live scan of the later test unit (serial redacted) reported RHS2116 command streams 0 through 7 across
+  ports A/B/C/D, with USB pipe error 0. Before the fix, read-only 64-channel
+  acquisition failed with the strict B2/B3/C4/C5 layout error despite those four
+  streams being present. This was a stream-selection limitation, not USB failure.
+- Compared the supplied Intan controller's per-stream `enableDataStream` behavior
+  and `addAmplifierChannels` indexing. Selected data are parsed using compact
+  enabled-stream positions, while hardware commands and channel metadata preserve
+  the physical command stream. No vendor driver or FPGA changes were needed.
+- Native selection now extracts B2/B3/C4/C5 from a valid four-to-eight-stream scan.
+  Extra A/D streams are disabled, all eight streams' stimulation triggers are
+  disabled at acquisition initialization, and target port/stream metadata is set
+  to selected B2 rather than the first chip found on A. Missing B/C streams,
+  duplicate addresses and inconsistent port/stream pairs still fail closed.
+- Frontend probe-route validation follows the same subset rule. Native regression
+  cases cover four/eight-chip scans, shuffled order, missing streams, duplicates,
+  wrong port/type, unsupported channel counts and simulated A/D trigger isolation.
+  Frontend cases verify identical probe routing with four or eight detected chips.
+- On that test unit after the fix, 64-channel read-only acquisition collected 147 blocks
+  / 150,528 samples per channel in 5.027 seconds (29,943.1 samples/second/channel),
+  with zero timestamp gaps and zero queue overflows. Target metadata was B/stream 2.
+- All-64-channel fixed-preset preload then collected 59 blocks / 60,416 samples
+  per channel using streams [2,3,4,5], with zero stimulation markers, stimulation
+  events, timestamp gaps and queue overflows. The 16-channel no-trigger preload
+  regression on A/stream 0 also collected 59 blocks with all four counters zero.
+- 100 Rust tests, frontend test groups and native simulated-controller tests passed.
+  No real stimulation trigger was sent. This validates selected-stream acquisition
+  and disabled-output parameter programming, not delivered pulses or physical
+  electrode isolation, and does not add full 128-channel support or full RHX parity.
+
+## 2026-10-22 - Desktop B-000 feedback and unresolved worker disconnect
+
+- Corrected manual trigger indices 0..7 to sequencer sources 24..31, matching the
+  supplied Intan implementation. Offline native tests model the matching trigger
+  edge, including rejection of digital source 0 for manual trigger 0.
+- The user operated the installed RHS Studio, not a CLI trigger, on that test unit.
+  Audits `stim-1792670358778689000`, `stim-1792670409295769700` and
+  `stim-1792670433325754300` each contain one Queued / Triggered / Observed /
+  Completed chain. Each selects only B-000 / stream 2 / channel 0 with stream mask
+  [0,0,1,0,0,0,0,0], 10 nA, 200 us phases, 100 us gap and one biphasic pulse.
+- Observed scheduling errors were 694, 674 and 709 samples (23.133, 22.467 and
+  23.633 ms). Completion indices are derived from the observed marker and finite
+  programmed timing; they are not external measurements of pulse width or current.
+  All audit records explicitly state currentMeasured=false.
+- Subsequent attempts, including fresh acquisition sessions, ended with
+  `acquisition worker disconnected` without complete feedback. Output cannot be
+  inferred for incomplete attempts. The UI entered FAULT / DISARMED / INTERLOCKED.
+  Three successes do not qualify long-run stability or all 64 physical outputs.
+- Found a deterministic diagnostic defect: the desktop consumed only one worker
+  status on disconnect, allowing an old Started status to obscure the actual
+  Fault. It now skips startup statuses, retains terminal errors through join,
+  preserves panic detail and remaining stimulation events, and publishes final
+  discontinuity/overflow counters rather than leaving the last healthy snapshot.
+- Duplicate Arm is rejected before creating a replacement audit or resetting the
+  lifetime/completion counter. Frontend controls reject concurrent stimulation
+  actions and show a newly reported acquisition fault explicitly.
+- 110 Rust tests, all seven frontend groups and Clippy with warnings denied passed.
+  New offline tests reproduce Started-before-Fault, terminal-error propagation,
+  panic detail, repeated Arm preservation and stimulation button states. No new
+  hardware trigger was sent for these diagnostic changes. The underlying worker
+  termination cause remains unresolved pending a fresh desktop diagnostic trace.
+
+## 2026-10-22 - Bounded repeat and production-loop stop regressions
+
+- Isolated the acquisition I/O boundary so the same production worker loop runs
+  against an offline simulated transport in tests. The real driver, initialization,
+  physical stream mapping and sample processing are unchanged by that boundary.
+- New production-loop tests pass three sequential finite commands with continuous
+  acquisition, emergency cancellation before any trigger, emergency cancellation
+  of active and queued future commands, and injected trigger/read failures.
+  Faulted commands emit Fault, never false Completed, and retain the original
+  terminal error. Emergency-stop latching rejects later commands until restart.
+- Added an explicitly selected no-bio repeated functional mode: one fixed pulse
+  per manual Trigger, at most three submissions per Arm, at least one second
+  between submissions, and the unchanged 60-second lifetime. Default single-shot
+  mode remains one submission. No automatic repeat sequence is enabled here.
+  The budget counts submitted commands, including attempts without completion.
+- 115 Rust tests, all seven frontend test groups, native simulated-controller
+  tests and Clippy with warnings denied passed. None of these tests uses a real
+  electrical load, emits hardware pulses or measures emergency-stop latency.
+- Subsequent single-shot user audit logs include complete sequences on the
+  diagnostic build, but do not reproduce the old worker exit with a specific
+  error. The original disconnect root cause is not claimed solved. Live GUI
+  repeated-trigger and pending/active emergency-stop verification are pending.
+- Known-load current, phase widths, biphasic waveform and cell-culture MEA
+  experiment readiness remain unverified. At this checkpoint no biological-use
+  mode was enabled; the separate configurable research mode is documented below.
+
+## 2026-10-23 - Configurable research output
+
+- Added a distinct hardware-configurable mode for existing 16/64-channel routes.
+  It requires an operator and explicit routing, parameter-review and unverified
+  output acknowledgements, without inventing dummy-load or instrument checks.
+  Ambiguous confirmation modes, stale preload and mismatched layouts fail closed.
+- Arm exposes quantized current, phase width, gap, frequency, pulse count and
+  nominal charge per phase. Existing current/timing bounds remain unchanged;
+  delayed biphasic is supported, triphasic and active recovery are not.
+- Configurable output has a cumulative 16-command budget per 60-second Arm,
+  checked arithmetic, remaining-lifetime checks and inter-submission spacing.
+  Mode changes clear acknowledgements. Editing requires stopped acquisition;
+  real output remains unavailable in browser preview.
+- 119 Rust workspace tests and all seven frontend groups passed. New tests cover
+  16/64 routing, explicit mode separation, quantization, cumulative budget,
+  timing overflow, remaining lifetime and truthful audit confirmations. Native
+  simulated-controller regressions also passed without hardware output.
+- Browser preview at 1280x720 showed the three distinct acknowledgements and
+  a fitting 16-channel editor with hardware bounds and triphasic disabled.
+  Browser error logs were empty. Preview uses synthetic data, not a live board.
+- No new real pulse was emitted for these changes. Physical current, waveform,
+  all-channel isolation, live repeated-trigger/stop latency and cell-culture
+  suitability remain unverified. The earlier worker-disconnect root cause is
+  not claimed resolved by offline tests or successful single-shot feedback.
+
+## 2026-10-23 - Third-trigger compliance fault diagnosis
+
+- Read the user-operated installed-client audit `stim-1792687724177973100`.
+  B-000 / command stream 2 / chip channel 0 used nominal 10 nA, 200 us phases,
+  100 us gap and one pulse. Commands 1 and 2 each reported Queued, Triggered,
+  Observed and Completed. Command 3 reported Queued and Triggered, followed by
+  RHS2116 compliance warning at sample 364262 with compact mask 0x0001.
+  The session ended with that explicit ProtocolError, not an unknown worker exit.
+- Read-only inspection of the running client confirmed FAULT / DISARMED /
+  INTERLOCKED and the same compliance error. Acquisition had stopped, leaving
+  the last waveform frame visible. No additional trigger was sent for diagnosis.
+  Compliance indicates reported insufficient current-source voltage headroom;
+  the audit alone does not distinguish an open circuit, return path, electrode
+  impedance, supply problem or prove delivered current. No physical measurements
+  were made. This identifies this incident, not every earlier worker disconnect.
+- Kept fail-closed output and acquisition shutdown. The worker now latches
+  stimulation immediately on compliance detection and reports physical channel
+  labels alongside the full 64-bit mask. Terminal desktop faults preserve the
+  completed/submitted counts, last command, programmed settings and audit path,
+  while clearing Arm and pending commands and forcing INTERLOCKED.
+- Added a persistent fault band above the views and explicit fault messaging in
+  the stimulation panel. Retained waveforms are labelled non-live. The canvas
+  now respects available dimensions when the fault band reduces plot height.
+- 122 Rust tests, all seven frontend groups and Clippy with warnings denied
+  passed. A new production-loop simulated-I/O test completes two commands,
+  injects compliance on the third, faults a queued fourth, rejects new commands,
+  and asserts no false completion. Address tests include bit 63 and odd streams;
+  desktop and frontend tests preserve counts and disable faulted controls.
+- Synthetic UI checks at 1280x720, 1040x680 and 1460x920 showed the fault band;
+  the final desktop layout keeps the canvas above its readout without overlap.
+  Browser errors were empty. The fixture is excluded from packages and never
+  connects to hardware. Neither output settings nor compliance protection was
+  weakened; live loaded repeat testing remains outstanding.
+
+## 2026-10-23 - Hardware impedance path
+
+- Replaced desktop impedance preparation-only behavior with a background native
+  measurement worker for 16/64-channel profiles. Requests validate explicit AC
+  injection acknowledgement, unique physical channel routing and 10..2000 Hz.
+  The 120-channel profile is rejected. No scan starts automatically.
+- Adapted the supplied GPL Intan RHX ImpedanceReader algorithm: 30 kHz sample
+  clock, integer-period DAC sine, 0.1/1/10 pF series capacitors, at least five
+  periods / 20 ms, startup settling, correlation, saturation-aware range choice,
+  three-command SPI phase correction, 12 pF parallel correction and RHS 1.1 gain
+  correction. Uses the original impedance reader's 0.195 uV ADC scale. Software
+  notch/band-pass nodes are not applied to this separate test acquisition.
+- Only one selected physical stream receives auxiliary impedance commands at
+  a time. All stimulation sequencers/manual triggers are disabled by initial
+  acquisition-session setup. No stimulation preset or Trigger is used. Finite
+  native runs check USB headers and timestamp continuity and have timeouts.
+  Completion/cancellation restores Zcheck off and flat/powered-down test DAC;
+  cleanup exceptions retain an error instead of claiming successful cancellation.
+- A hardware-operation mutex and running/cancelling state exclude new scans,
+  acquisition and playback. The UI disables incompatible actions, reports actual
+  quantized frequency, channel progress, magnitude, phase and quality, and offers
+  an expanded results grid and CSV with physical addresses and source labels.
+  Emergency Stop and app shutdown also signal the impedance worker to cancel.
+- 126 Rust workspace tests, eight frontend groups, Clippy with warnings denied
+  and native tests passed. Native synthetic fixtures verify correlation with
+  phase/DC offset, integer frequency, range/quality logic and known parallel-RC
+  correction including Intan's empirical factor. Rust tests cover all 64 route
+  indices, invalid channels/frequencies, confirmation and operation exclusion.
+  A pre-cancelled request returns before bitfile validation or native device open
+  and cannot report any measured channels.
+- Synthetic 64-result UI fixtures at 1280x720 and 1460x920 rendered magnitude,
+  phase, progress, scrolling and expansion without result text overflow or browser
+  errors. Preview is labelled synthetic and refuses real-measurement requests.
+- No real impedance test signal was injected during this implementation. This
+  is not a measured known-resistor accuracy test or a live cancellation/cleanup
+  validation. Comparison with RHX on identical loads and frequencies, all-channel
+  measurement accuracy and post-cancel hardware recovery remain pending.
+
+## 2026-10-23 Full-Rate Spike Analysis
+
+- Added a separate all-input-channel candidate-spike analyzer before display
+  decimation. Signed uV thresholds, refractory periods, pre/post windows and an
+  optional dedicated 300-3000 Hz band-pass are configurable while stopped.
+- Retains crossing/peak sample indices, source time, physical stream/chip channel,
+  signed peak, peak-to-peak voltage and complete full-rate snippets. Gap/artifact
+  resets and session-end incomplete snippets are explicit, not interpolated.
+- Backend continuous CSV uses create-new semantics and reports open/write/finalize
+  failures without stopping acquisition. Bounded event polling reports UI losses;
+  cached CSV export is distinct from a durable session record.
+- Spike tab now has raster, per-channel waveform and numeric-event views. Activity
+  spike rates and statistics use these events instead of the 200-entry log. Spike
+  statistics snippets no longer use min/max display bins. Playback seeks/restarts
+  and pipeline changes reset the UI analysis segment without reusing CSV event IDs.
+- 136 Rust workspace tests and nine frontend test groups pass; Clippy passes with
+  warnings denied. New tests cover all 16/64/120 software channels, exact numerical
+  peaks, full-rate filtering, cross-block snippets, refractory/polarity, gap/artifact
+  rejection, cursor eviction, segment resets, CSV contents/overwrite protection and
+  a forced write failure that leaves detection operational.
+- Browser UI interaction tests use synthetic data only. Verified 64 channel tiles,
+  data values, calibrated axes and scrollable waveforms. Fixed early grid items
+  being drawn before the final grid layout, which previously squeezed canvas text.
+- No real stimulation or impedance signal was emitted for these checks. Biological
+  detection sensitivity/specificity and sustained USB + recording + UI performance
+  remain unvalidated. Threshold crossings are not sorted neuronal units.
+
+## 2026-10-29 MEA 64 Display Mapping
+
+- Corrected array-site mapping: sites 0..31 use B port with the same zero-based
+  channel number; sites 32..63 use C port with channel = site - 32. Preserved the
+  8x8 physical site layout; its second row ends in 52, 53.
+- Display names are B-00..31 / C-00..31; stable command/storage IDs remain
+  B-000..031 / C-000..031. Acquisition lane order, FPGA/native code and physical
+  stimulation/impedance routes were not modified.
+- Activity and selection arrays show both site number and port-local name.
+  Waveform labels, channel selectors, activity inspector and shared profile users
+  receive the same names. Default labels in legacy settings are upgraded; custom
+  aliases/colors/enabled states are retained. Old saved array coordinates rebase
+  to layout version 2, including recovery snapshots and loaded experiment presets.
+- All nine frontend test groups pass. Tests verify every cell's site-to-data-index
+  relationship with distinct synthetic per-channel amplitudes, bijective inverse
+  mappings, both 52/53 locations, stable physical routing, legacy-settings recovery,
+  migration idempotence, and current-version layout editing. Browser checks confirm
+  9 -> B-09/data lane 9, 62 -> C-30/data lane 62, activity selection B-09,
+  and waveform pagination through C-16..C-31. UI data are synthetic, not a new
+  electrical channel-mapping measurement. No hardware test signal was emitted.
+
+## 2026-10-29 Single-Channel Waveform View
+
+- Added display-only single-channel focus with a full-height trace, uV amplitude
+  ticks and source-sample-based relative time axis. Focus controls are separate
+  from acquisition and output commands. Channel names use the shared MEA profile.
+- Entry points: waveform mode controls, double-click a lane/label, or the activity
+  inspector. Supports channel selection and previous/next navigation, amplitude
+  fitting of the focused channel only, time-window controls, display pause and
+  return to the unchanged overview page. Workspace recovery retains focus mode.
+- Nine frontend test groups pass. Added tests cover 16/64/120-channel focus
+  boundaries, retained page/visibility/gain/frame references, a full-height trace
+  instead of multiple lanes, fitting a hidden focused channel, non-mutated sample
+  buffers, and display pause. Existing routing and recording-related tests pass.
+- Synthetic browser checks verified B-09 and C-30 selection, synced amplitude and
+  focus selectors, 500 ms timing, first/last-channel disabled navigation, label
+  double-click, activity-map entry and focus recovery after reload. While display
+  was paused the preview backend stayed ACQUIRING. No hardware signals were sent.
+- Focus uses display min/max bins; it does not restore sample detail lost to
+  display decimation. Biological signal quality and hardware performance were
+  not measured in these checks.
+
+## 2026-10-29 Click-To-Enter Channel Details
+
+- A single click on a waveform lane or channel label enters that channel's
+  full-height view. A separate visibility checkbox retains overview hide/show
+  controls. Clicking inside the detailed plot does not unexpectedly exit it.
+- Detail actions use the same channel for amplitude, spectrum/spectrogram and
+  spike statistics/snippets; both analysis views have a return-to-waveform action.
+- All nine frontend test groups pass, including new page-aware lane hit tests,
+  out-of-bounds clicks, label entry and independent visibility control tests.
+- Synthetic browser acquisition verified B-09 label entry, B-24 lane entry on
+  page 17-32, analysis selector synchronization, continued sequence increments,
+  amplitude fitting, 500 ms display timing and return to page 17-32. At 1024x768
+  the detail toolbar did not overflow; the plot retained 445 px height. Browser
+  error/warning logs were empty. No hardware output or new electrical test was
+  performed. These remain display envelopes, not recovered full-rate samples.
+
+## 2026-10-29 Waveform Continuity And Display Buffer
+
+- Compared local Intan waveformdisplaymanager.cpp: compressed views draw a
+  min/max line per screen column with a one-device-pixel cosmetic pen; sufficiently
+  zoomed views use polylines. Our previous renderer drew independent envelopes
+  without joining bins and distributed overview frames by point count. The
+  desktop poll returned only the newest frame, losing intermediate display blocks
+  when the UI was slower than the producer. These were display-path defects, not
+  evidence that the raw recorder had dropped the same samples.
+- Added cursor-based poll_waveforms with bounded source-time history and a
+  generation for start/seek/source resets. The legacy latest-frame command remains
+  available. Added exact sample counts and first/last sample endpoints per bin,
+  including a partially filled final bin. Raw acquisition, recording and stimulus
+  scheduling were not changed.
+- Overview/detail use one source-time coordinate system. Pixel envelopes retain
+  extrema, contiguous samples are connected, and genuine gaps/flagged boundaries
+  remain disconnected. Display-gap indication is distinct from capture metrics.
+  A paused or slow UI can recover retained frames without duplicate processing;
+  eviction outside the bounded history is explicit. Spectral history cannot span
+  a missing interval. Display envelopes are still not full-rate reconstruction.
+- All 139 Rust tests, nine frontend groups and warning-free Clippy pass. New tests
+  cover multi-block polling/cursors, eviction/reset, time retention, partial bins,
+  pixel extrema, endpoints, honest gap spacing, flags, and spectral gap resets.
+- Browser checks with 64 synthetic channels and a 1-second window show continuous
+  traces, a hidden gap badge for a continuous source, and no browser warnings or
+  errors. The screenshot is simulated data; hardware acquisition/noise quality
+  was not measured in this update. No hardware stimulus was emitted.
+
+## 2026-10-29 NeuroX Studio Product Branding
+
+- Renamed the window/product metadata, header, reports, diagnostic exports and
+  startup messages to NeuroX Studio. The source node uses a neutral acquisition
+  label. New recording/export names use the neurox prefix; original .rhsraw files
+  remain readable and existing user-selected paths are not rewritten.
+- Kept the application identifier and legacy local-storage keys to retain channel
+  mappings, presets and workspace recovery. Actual RHS2116 hardware identification,
+  the recording protocol/format and third-party license notices remain accurate.
+- Packaging emits NeuroX Studio.exe. New installs use the NeuroX Studio directory;
+  upgrades preserve the legacy working directory. Desktop/Start menu shortcuts
+  use NeuroX Studio, and matching legacy shortcuts are backed up before removal.
+- Nine frontend test groups pass, including product-name consistency, preserved
+  configuration identifiers and new default recording-name checks. The installer
+  passes PowerShell syntax validation. This rename does not send hardware commands.
+
+## 2026-10-29 Layout And Per-Channel Voltage Ranges
+
+- Removed event-console markup, rendering, controls, styles and its reserved grid
+  row. The bounded diagnostic event history remains for exports/analysis. Added
+  independent accessible left/right panel toggles, saved in workspace recovery and
+  experiment display settings. Enlarged common text, controls and channel labels;
+  toolbar controls wrap instead of competing with the navigation tabs.
+- Added lower/upper absolute uV limits per profile and stable channel ID, including
+  asymmetric ranges. Invalid/nonfinite/reversed limits are rejected. Applying,
+  resetting and fitting affect only display state; raw samples, ADC conversion,
+  overview gain and hardware output are unchanged. Paths are clipped at the range
+  bounds instead of clamped to artificial plateaus. Display clipping and ADC rail
+  saturation have separate indicators.
+- Nine frontend groups pass, with tests for removed console controls, manual
+  range validation, calibrated endpoints/midpoint, asymmetric mapping, geometric
+  clipping, unchanged samples and overview gain independence.
+- Browser checks: 64-channel synthetic acquisition continued as panels collapsed;
+  plot width expanded from 562 to 850 to 1178 px. B-09 retained -20..20 uV and B-10
+  -10..50 uV independently, including after reload. Invalid ranges left the applied
+  range unchanged. Reset and spectrum navigation worked. At 1040x760 with both
+  panels open there was no page/toolbar/range-form horizontal overflow, and the
+  plot retained 334 px height. Browser warning/error logs were empty. These are
+  display tests, not biological-signal or hardware-output qualification.
+
+## 2026-10-29 Impedance Probe Map And Device Tools
+
+- Removed the digital/analog I/O and local-status API tool sections, their DOM
+  callbacks and obsolete layout styles. Retained impedance and audio monitoring
+  as full-width sections, plus existing scan isolation, cancellation, explicit
+  AC confirmation and stimulation interlocks. Native internal services were not
+  broadened or automatically started.
+- Impedance scan requests, array cells and CSV exports now follow the shared
+  configured Probe Map. MEA 64 uses an 8x8 array: left sites map directly to B,
+  right sites minus 32 to C. First row: B-09/B-08/B-05/B-01/C-30/C-26/C-23/C-22.
+  Stable channel IDs bind result values; response order does not assign positions.
+  Source profile metadata prevents rebinding old results to a newly selected MEA.
+- Physical stream/chip addresses are checked against the channel ID; mismatches
+  are explicitly marked instead of shown as trusted values. CSV retains raw
+  results and adds display/site/row/column metadata. Partial results leave array
+  positions stable; disabled electrodes are excluded from scan requests. Unknown
+  and duplicate results remain represented in CSV for diagnosis.
+- Nine frontend groups, all 140 Rust tests and warning-free Clippy pass. New tests
+  assign distinct values to all 64 physical channels, reverse response ordering,
+  verify every site/coordinate/address/value, validate CSV order, partial results,
+  aliases/disabled cells, mismatch/duplicate/unknown handling, 16/120 layouts and
+  native conversion of the first map row to indices 9/8/5/1/62/58/55/54.
+- Browser checks verified 64 impedance cells in exactly the same ID order as the
+  activity map, only two remaining tool sections, 16/64 switching, expand/restore,
+  and no warning/error logs. At 1040x760 the page has no horizontal overflow; the
+  array scrolls internally without reflowing electrodes. All visible pending
+  cells are unmeasured: no real impedance scan or hardware test signal was run.
+
+## 2026-11-02 Dual-Column Waveforms And Independent Ranges
+
+- The default overview shows 64 channels in two columns, 32 lanes per column.
+  MEA 64 keeps B-00..B-31 on the left and C-00..C-31 on the right. The original
+  16-channel layout remains selectable; 120-channel sources use 64-channel pages.
+- Each stable channel ID has its own absolute microvolt range in both overview
+  and single-channel detail. Limits, resets, asymmetric ranges, clipping warnings
+  and session recovery use the same settings without modifying sample data.
+- Waveforms, labels, pointer hit tests and spike dots share column/lane geometry.
+  Narrow or short surfaces scroll internally instead of crushing channel labels.
+- All 11 frontend test groups pass. Optional Playwright regression
+  `npm run test:waveform-browser` requires Node 20+, Playwright and a running
+  synthetic preview (default http://127.0.0.1:1421/). It refuses hardware backends.
+  This test passes for 1920x1080, 1460x920 and 390x844, including pixel checks,
+  right-column entry, independent B-09/C-09 ranges, invalid-input isolation,
+  reset, reload recovery, pagination and screenshots without page errors.
+- Release builds embed the updated frontend. No acquisition, recording, routing,
+  stimulation or device protocol code was changed or exercised on hardware.
+- Added explicit apply-to-all and reset-all commands for the current source
+  profile. They share input validation with individual ranges, include channels
+  on other pages, preserve other profiles and persist through session recovery.
+  Playwright checks pass for all 16/64/120 entries, invalid-input non-mutation,
+  individual overrides after bulk application, focused detail and isolated reset.

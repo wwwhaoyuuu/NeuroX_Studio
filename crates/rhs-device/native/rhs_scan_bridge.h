@@ -24,6 +24,7 @@ int rhs_scan_connected_chips(const char* bitfile_path, const char* serial, RhsSc
 
 typedef struct RhsStimConfig {
     int channel;
+    int channel_mask;
     int trigger;
     int pulses;
     int magnitude_steps;
@@ -31,6 +32,7 @@ typedef struct RhsStimConfig {
     int phase_steps;
     int interphase_steps;
     int period_steps;
+    int stream_masks[RHS_SCAN_MAX_RESULTS];
 } RhsStimConfig;
 
 typedef struct RhsStimSession RhsStimSession;
@@ -38,6 +40,15 @@ typedef struct RhsStimSession RhsStimSession;
 int rhs_stim_open(
     const char* bitfile_path,
     const char* serial,
+    RhsStimSession** out_session,
+    RhsScanResult* out
+);
+
+int rhs_stim_open_target(
+    const char* bitfile_path,
+    const char* serial,
+    int expected_port,
+    int expected_stream,
     RhsStimSession** out_session,
     RhsScanResult* out
 );
@@ -76,6 +87,13 @@ typedef struct RhsAcquisitionInfo {
     char device_serial[64];
     char message[512];
 } RhsAcquisitionInfo;
+
+int rhs_acquisition_open_channels(
+    const char* bitfile_path, const char* serial, int blocks_per_read,
+    int channel_count, RhsAcquisitionSession** out_session, RhsAcquisitionInfo* out_info
+);
+
+int rhs_acquisition_streams(RhsAcquisitionSession* session, int* streams, size_t capacity);
 
 typedef struct RhsAcquisitionReadResult {
     int return_code;
@@ -130,11 +148,11 @@ int rhs_acquisition_read(
     size_t amplifier_capacity,
     uint16_t* ttl_in,
     size_t ttl_capacity,
-    uint16_t* stim_on,
+    uint64_t* stim_on,
     size_t stim_on_capacity,
-    uint16_t* stim_polarity,
+    uint64_t* stim_polarity,
     size_t stim_polarity_capacity,
-    uint16_t* compliance_limit,
+    uint64_t* compliance_limit,
     size_t compliance_capacity,
     uint16_t* dc_amplifier_samples,
     size_t dc_amplifier_capacity,
@@ -144,6 +162,25 @@ int rhs_acquisition_read(
 int rhs_acquisition_stop(RhsAcquisitionSession* session, RhsAcquisitionInfo* out_info);
 
 void rhs_acquisition_close(RhsAcquisitionSession* session);
+
+typedef struct RhsImpedanceSession RhsImpedanceSession;
+typedef int (*RhsImpedanceCancelled)(void* context);
+typedef struct RhsImpedanceResult {
+    int return_code;
+    int stream;
+    int channel;
+    int quality;
+    double frequency_hz;
+    double magnitude_ohms;
+    double phase_degrees;
+    char message[512];
+} RhsImpedanceResult;
+
+int rhs_impedance_open(const char* bitfile, const char* serial, int channels,
+    double frequency, RhsImpedanceSession** out, RhsAcquisitionInfo* info);
+int rhs_impedance_measure(RhsImpedanceSession* session, int index,
+    RhsImpedanceCancelled cancelled, void* context, RhsImpedanceResult* result);
+void rhs_impedance_close(RhsImpedanceSession* session);
 
 #ifdef __cplusplus
 }

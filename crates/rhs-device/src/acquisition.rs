@@ -4,13 +4,170 @@ use std::collections::{BTreeSet, VecDeque};
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_int};
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 const MAX_STIM_COMMAND_IDS_PER_WORKER: usize = 4096;
+
+#[repr(C)]
+struct RawImpedanceResult {
+    return_code: c_int,
+    stream: c_int,
+    channel: c_int,
+    quality: c_int,
+    frequency_hz: f64,
+    magnitude_ohms: f64,
+    phase_degrees: f64,
+    message: [c_char; 512],
+}
+
+#[derive(Debug, Clone)]
+pub struct ImpedanceMeasurement {
+    pub index: usize,
+    pub stream: u8,
+    pub channel: u8,
+    pub frequency_hz: f64,
+    pub magnitude_ohms: f64,
+    pub phase_degrees: f64,
+    pub quality: &'static str,
+}
+
+struct ImpedanceSession(NonNull<std::ffi::c_void>);
+impl Drop for ImpedanceSession {
+    fn drop(&mut self) {
+        unsafe { rhs_impedance_close(self.0.as_ptr()) };
+    }
+}
+
+extern "C" fn impedance_cancelled(context: *mut std::ffi::c_void) -> c_int {
+    // The synchronous native call borrows this AtomicBool until it returns.
+    unsafe { &*context.cast::<AtomicBool>() }.load(Ordering::Acquire) as c_int
+}
+
+impl RhsDevice {
+    pub fn measure_impedances(
+        &self,
+        channel_count: usize,
+        frequency: f64,
+        indices: &[usize],
+        cancelled: &AtomicBool,
+        mut progress: impl FnMut(ImpedanceMeasurement),
+    ) -> Result<bool, DeviceError> {
+        validate_impedance_request(channel_count, frequency, indices)?;
+        if cancelled.load(Ordering::Acquire) {
+            return Ok(false);
+        }
+        let bitfile = c_path(&self.bitfile).map_err(|error| {
+            DeviceError::new(DeviceErrorCode::InvalidArgument, error.to_string())
+        })?;
+        let serial = c_optional(&self.serial).map_err(|error| {
+            DeviceError::new(DeviceErrorCode::InvalidArgument, error.to_string())
+        })?;
+        let mut raw = std::ptr::null_mut();
+        let mut info = RawAcquisitionInfo::empty();
+        let code = unsafe {
+            rhs_impedance_open(
+                bitfile.as_ptr(),
+                serial.as_ref().map_or(std::ptr::null(), |s| s.as_ptr()),
+                channel_count as c_int,
+                frequency,
+                &mut raw,
+                &mut info,
+            )
+        };
+        if code != 1 {
+            return Err(error_from_code(code, info.message_string()));
+        }
+        let session = ImpedanceSession(NonNull::new(raw).ok_or_else(|| {
+            DeviceError::new(DeviceErrorCode::Internal, "missing impedance session")
+        })?);
+        for &index in indices {
+            if cancelled.load(Ordering::Acquire) {
+                return Ok(false);
+            }
+            let mut result = RawImpedanceResult {
+                return_code: 0,
+                stream: 0,
+                channel: 0,
+                quality: 0,
+                frequency_hz: 0.0,
+                magnitude_ohms: 0.0,
+                phase_degrees: 0.0,
+                message: [0; 512],
+            };
+            let code = unsafe {
+                rhs_impedance_measure(
+                    session.0.as_ptr(),
+                    index as c_int,
+                    impedance_cancelled,
+                    (cancelled as *const AtomicBool).cast_mut().cast(),
+                    &mut result,
+                )
+            };
+            if code == -2 {
+                return Ok(false);
+            }
+            if code != 1 {
+                return Err(error_from_code(
+                    code,
+                    unsafe { CStr::from_ptr(result.message.as_ptr()) }
+                        .to_string_lossy()
+                        .into_owned(),
+                ));
+            }
+            if !(0..8).contains(&result.stream)
+                || !(0..16).contains(&result.channel)
+                || !result.frequency_hz.is_finite()
+                || !result.magnitude_ohms.is_finite()
+                || !result.phase_degrees.is_finite()
+            {
+                return Err(DeviceError::new(
+                    DeviceErrorCode::ProtocolError,
+                    "invalid impedance result",
+                ));
+            }
+            progress(ImpedanceMeasurement {
+                index,
+                stream: result.stream as u8,
+                channel: result.channel as u8,
+                frequency_hz: result.frequency_hz,
+                magnitude_ohms: result.magnitude_ohms,
+                phase_degrees: result.phase_degrees,
+                quality: match result.quality {
+                    0 => "measured",
+                    1 => "saturated",
+                    2 => "low-signal",
+                    _ => "invalid",
+                },
+            });
+        }
+        Ok(!cancelled.load(Ordering::Acquire))
+    }
+}
+
+fn validate_impedance_request(
+    channels: usize,
+    frequency: f64,
+    indices: &[usize],
+) -> Result<(), DeviceError> {
+    let unique: BTreeSet<_> = indices.iter().collect();
+    if !matches!(channels, 16 | 64)
+        || !frequency.is_finite()
+        || !(10.0..=2000.0).contains(&frequency)
+        || indices.is_empty()
+        || unique.len() != indices.len()
+        || indices.iter().any(|i| *i >= channels)
+    {
+        return Err(DeviceError::new(
+            DeviceErrorCode::InvalidArgument,
+            "impedance requires 16/64-channel layout, unique valid channels and 10..2000 Hz",
+        ));
+    }
+    Ok(())
+}
 
 #[repr(C)]
 struct RawAcquisitionSession {
@@ -55,12 +212,35 @@ struct RawAcquisitionStimResult {
 
 #[link(name = "rhs_bridge", kind = "static")]
 extern "C" {
-    fn rhs_acquisition_open(
+    fn rhs_impedance_open(
+        bitfile: *const c_char,
+        serial: *const c_char,
+        channels: c_int,
+        frequency: f64,
+        out: *mut *mut std::ffi::c_void,
+        info: *mut RawAcquisitionInfo,
+    ) -> c_int;
+    fn rhs_impedance_measure(
+        session: *mut std::ffi::c_void,
+        index: c_int,
+        cancelled: extern "C" fn(*mut std::ffi::c_void) -> c_int,
+        context: *mut std::ffi::c_void,
+        result: *mut RawImpedanceResult,
+    ) -> c_int;
+    fn rhs_impedance_close(session: *mut std::ffi::c_void);
+    fn rhs_acquisition_open_channels(
         bitfile_path: *const c_char,
         serial: *const c_char,
         blocks_per_read: c_int,
+        channel_count: c_int,
         out_session: *mut *mut RawAcquisitionSession,
         out_info: *mut RawAcquisitionInfo,
+    ) -> c_int;
+
+    fn rhs_acquisition_streams(
+        session: *mut RawAcquisitionSession,
+        streams: *mut c_int,
+        capacity: usize,
     ) -> c_int;
 
     fn rhs_acquisition_start(
@@ -92,11 +272,11 @@ extern "C" {
         amplifier_capacity: usize,
         ttl_in: *mut u16,
         ttl_capacity: usize,
-        stim_on: *mut u16,
+        stim_on: *mut u64,
         stim_on_capacity: usize,
-        stim_polarity: *mut u16,
+        stim_polarity: *mut u64,
         stim_polarity_capacity: usize,
-        compliance_limit: *mut u16,
+        compliance_limit: *mut u64,
         compliance_capacity: usize,
         dc_amplifier_samples: *mut u16,
         dc_amplifier_capacity: usize,
@@ -142,6 +322,7 @@ pub struct AcquisitionInfo {
     pub blocks_per_read: usize,
     pub target_stream: u8,
     pub target_port: u8,
+    pub streams: Vec<u8>,
     pub bytes_per_block: usize,
     pub pipe_read_error: i32,
     pub device_serial: String,
@@ -153,9 +334,9 @@ pub struct AcquisitionBatch {
     pub timestamps: Vec<u32>,
     pub amplifier_samples: Vec<u16>,
     pub ttl_in: Vec<u16>,
-    pub stim_on: Vec<u16>,
-    pub stim_polarity: Vec<u16>,
-    pub compliance_limit: Vec<u16>,
+    pub stim_on: Vec<u64>,
+    pub stim_polarity: Vec<u64>,
+    pub compliance_limit: Vec<u64>,
     pub dc_amplifier_samples: Vec<u16>,
     pub bytes_read: usize,
 }
@@ -213,7 +394,11 @@ struct AcquisitionSession {
 }
 
 impl AcquisitionSession {
-    fn open(device: &RhsDevice, config: AcquisitionConfig) -> Result<Self, DeviceError> {
+    fn open(
+        device: &RhsDevice,
+        config: AcquisitionConfig,
+        channel_count: usize,
+    ) -> Result<Self, DeviceError> {
         let config = config.validate()?;
         let bitfile = c_path(&device.bitfile).map_err(|error| {
             DeviceError::new(DeviceErrorCode::BitfileMissing, error.to_string())
@@ -225,12 +410,13 @@ impl AcquisitionSession {
         let mut raw_info = RawAcquisitionInfo::empty();
 
         let code = unsafe {
-            rhs_acquisition_open(
+            rhs_acquisition_open_channels(
                 bitfile.as_ptr(),
                 serial
                     .as_ref()
                     .map_or(std::ptr::null(), |value| value.as_ptr()),
                 config.blocks_per_read as c_int,
+                channel_count as c_int,
                 &mut raw_session,
                 &mut raw_info,
             )
@@ -245,11 +431,26 @@ impl AcquisitionSession {
             )
         })?;
         let info = raw_info.try_into_info()?;
-        Ok(Self {
+        let mut session = Self {
             raw,
             info,
             running: false,
-        })
+        };
+        let mut streams = [-1; 8];
+        let count = unsafe {
+            rhs_acquisition_streams(session.raw.as_ptr(), streams.as_mut_ptr(), streams.len())
+        };
+        if count < 1 || count as usize != channel_count / 16 {
+            return Err(DeviceError::new(
+                DeviceErrorCode::ProtocolError,
+                "invalid stream layout returned by acquisition bridge",
+            ));
+        }
+        session.info.streams = streams[..count as usize]
+            .iter()
+            .map(|stream| *stream as u8)
+            .collect();
+        Ok(session)
     }
 
     fn start(&mut self) -> Result<(), DeviceError> {
@@ -308,9 +509,9 @@ impl AcquisitionSession {
         let mut timestamps = vec![0_u32; sample_count];
         let mut amplifier_samples = vec![0_u16; amplifier_count];
         let mut ttl_in = vec![0_u16; sample_count];
-        let mut stim_on = vec![0_u16; sample_count];
-        let mut stim_polarity = vec![0_u16; sample_count];
-        let mut compliance_limit = vec![0_u16; sample_count];
+        let mut stim_on = vec![0_u64; sample_count];
+        let mut stim_polarity = vec![0_u64; sample_count];
+        let mut compliance_limit = vec![0_u64; sample_count];
         let mut dc_amplifier_samples = vec![0_u16; amplifier_count];
         let mut raw_result = RawAcquisitionReadResult::empty();
 
@@ -393,6 +594,7 @@ impl Drop for AcquisitionSession {
 
 #[derive(Debug, Clone)]
 pub struct AcquisitionWorkerConfig {
+    pub channel_count: usize,
     pub acquisition: AcquisitionConfig,
     pub data_queue_capacity: usize,
     pub command_queue_capacity: usize,
@@ -404,6 +606,7 @@ pub struct AcquisitionWorkerConfig {
 impl Default for AcquisitionWorkerConfig {
     fn default() -> Self {
         Self {
+            channel_count: 16,
             acquisition: AcquisitionConfig::default(),
             data_queue_capacity: 8,
             command_queue_capacity: 8,
@@ -456,6 +659,7 @@ impl AcquisitionStatsInner {
 
 enum WorkerCommand {
     ScheduleStim(ScheduledStimRequest),
+    ScheduleBatch(Vec<ScheduledStimRequest>),
     CancelStim(u64),
     EmergencyStop,
     Stop,
@@ -469,6 +673,7 @@ pub struct AcquisitionHandle {
     command_tx: SyncSender<WorkerCommand>,
     stats: Arc<AcquisitionStatsInner>,
     next_sample_index: Arc<AtomicU64>,
+    emergency_latched: Arc<AtomicBool>,
     configured_stimulation: Option<StimConfig>,
     join: Option<JoinHandle<()>>,
 }
@@ -486,6 +691,10 @@ impl AcquisitionHandle {
         self.status_rx.try_recv()
     }
 
+    pub fn try_fault(&self) -> Option<DeviceError> {
+        drain_worker_fault(&self.status_rx)
+    }
+
     pub fn stats(&self) -> AcquisitionStats {
         self.stats.snapshot()
     }
@@ -500,6 +709,12 @@ impl AcquisitionHandle {
 
     pub fn schedule_stim(&self, request: ScheduledStimRequest) -> Result<(), DeviceError> {
         request.validate()?;
+        if self.emergency_latched.load(Ordering::Acquire) {
+            return Err(DeviceError::new(
+                DeviceErrorCode::NotRunning,
+                "stimulation emergency stop is latched; restart acquisition",
+            ));
+        }
         if self.configured_stimulation.is_none() {
             return Err(DeviceError::new(
                 DeviceErrorCode::InvalidArgument,
@@ -524,8 +739,30 @@ impl AcquisitionHandle {
     }
 
     pub fn emergency_stop(&self) -> Result<(), DeviceError> {
+        self.emergency_latched.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    pub fn stimulation_interlocked(&self) -> bool {
+        self.emergency_latched.load(Ordering::Acquire)
+    }
+
+    pub fn schedule_stim_batch(
+        &self,
+        requests: Vec<ScheduledStimRequest>,
+    ) -> Result<(), DeviceError> {
+        if requests.is_empty()
+            || requests.len() > 16
+            || self.configured_stimulation.is_none()
+            || self.stimulation_interlocked()
+        {
+            return Err(DeviceError::new(DeviceErrorCode::InvalidArgument, "hardware schedule requires 1..16 commands, a preset and an unlocked acquisition session"));
+        }
+        for request in &requests {
+            request.validate()?;
+        }
         self.command_tx
-            .try_send(WorkerCommand::EmergencyStop)
+            .try_send(WorkerCommand::ScheduleBatch(requests))
             .map_err(command_send_error)
     }
 
@@ -541,22 +778,43 @@ impl AcquisitionHandle {
     }
 
     pub fn request_stop(&self) {
+        self.emergency_latched.store(true, Ordering::Release);
         let _ = self.command_tx.send(WorkerCommand::Stop);
     }
 
     pub fn stop(mut self) -> Result<AcquisitionStats, DeviceError> {
         self.request_stop();
         if let Some(join) = self.join.take() {
-            join.join().map_err(|_| {
-                DeviceError::new(DeviceErrorCode::Internal, "acquisition worker panicked")
+            join.join().map_err(|payload| {
+                let message = payload
+                    .downcast_ref::<String>()
+                    .map(String::as_str)
+                    .or_else(|| payload.downcast_ref::<&str>().copied())
+                    .unwrap_or("unknown panic payload");
+                DeviceError::new(
+                    DeviceErrorCode::Internal,
+                    format!("acquisition worker panicked: {message}"),
+                )
             })?;
+        }
+        if let Some(error) = self.try_fault() {
+            return Err(error);
         }
         Ok(self.stats())
     }
 }
 
+fn drain_worker_fault(status_rx: &Receiver<WorkerStatus>) -> Option<DeviceError> {
+    // Started may still be queued when the data sender disconnects.
+    status_rx.try_iter().find_map(|status| match status {
+        WorkerStatus::Fault(error) => Some(error),
+        _ => None,
+    })
+}
+
 impl Drop for AcquisitionHandle {
     fn drop(&mut self) {
+        self.emergency_latched.store(true, Ordering::Release);
         let _ = self.command_tx.send(WorkerCommand::Stop);
         if let Some(join) = self.join.take() {
             let _ = join.join();
@@ -581,6 +839,12 @@ pub(super) fn spawn(
         ));
     }
     config.acquisition.validate()?;
+    if !matches!(config.channel_count, 16 | 64) {
+        return Err(DeviceError::new(
+            DeviceErrorCode::InvalidArgument,
+            "channel_count must be 16 or 64",
+        ));
+    }
     if let Some(stimulation) = &config.stimulation {
         validate_stim_config(stimulation).map_err(|error| {
             DeviceError::new(DeviceErrorCode::InvalidArgument, error.to_string())
@@ -597,6 +861,8 @@ pub(super) fn spawn(
     let next_sample_index = Arc::new(AtomicU64::new(0));
     let thread_next_sample_index = Arc::clone(&next_sample_index);
     let configured_stimulation = config.stimulation.clone();
+    let emergency_latched = Arc::new(AtomicBool::new(false));
+    let thread_emergency_latched = Arc::clone(&emergency_latched);
 
     let join = thread::Builder::new()
         .name("rhs-acquisition".to_string())
@@ -611,6 +877,7 @@ pub(super) fn spawn(
                 startup_tx,
                 thread_stats,
                 thread_next_sample_index,
+                thread_emergency_latched,
             );
         })
         .map_err(|error| {
@@ -629,6 +896,7 @@ pub(super) fn spawn(
             command_tx,
             stats,
             next_sample_index,
+            emergency_latched,
             configured_stimulation,
             join: Some(join),
         }),
@@ -657,14 +925,16 @@ fn run_worker(
     startup_tx: SyncSender<Result<AcquisitionInfo, DeviceError>>,
     stats: Arc<AcquisitionStatsInner>,
     next_sample_index_shared: Arc<AtomicU64>,
+    emergency_latched: Arc<AtomicBool>,
 ) {
-    let mut session = match AcquisitionSession::open(&device, config.acquisition) {
-        Ok(session) => session,
-        Err(error) => {
-            let _ = startup_tx.send(Err(error));
-            return;
-        }
-    };
+    let mut session =
+        match AcquisitionSession::open(&device, config.acquisition, config.channel_count) {
+            Ok(session) => session,
+            Err(error) => {
+                let _ = startup_tx.send(Err(error));
+                return;
+            }
+        };
     if let Some(stimulation) = &config.stimulation {
         if let Err(error) = session.configure_stim(stimulation) {
             let _ = startup_tx.send(Err(error));
@@ -678,14 +948,63 @@ fn run_worker(
 
     let info = session.info.clone();
     let _ = startup_tx.send(Ok(info.clone()));
+    run_acquisition_loop(
+        session,
+        info,
+        config,
+        data_tx,
+        status_tx,
+        stim_event_tx,
+        command_rx,
+        stats,
+        next_sample_index_shared,
+        emergency_latched,
+    );
+}
+
+trait AcquisitionIo {
+    fn read_batch(&mut self) -> Result<Option<AcquisitionBatch>, DeviceError>;
+    fn trigger_stim(&mut self) -> Result<(), DeviceError>;
+    fn cancel_stim(&mut self) -> Result<(), DeviceError>;
+    fn stop(&mut self) -> Result<(), DeviceError>;
+}
+
+impl AcquisitionIo for AcquisitionSession {
+    fn read_batch(&mut self) -> Result<Option<AcquisitionBatch>, DeviceError> {
+        AcquisitionSession::read_batch(self)
+    }
+    fn trigger_stim(&mut self) -> Result<(), DeviceError> {
+        AcquisitionSession::trigger_stim(self)
+    }
+    fn cancel_stim(&mut self) -> Result<(), DeviceError> {
+        AcquisitionSession::cancel_stim(self)
+    }
+    fn stop(&mut self) -> Result<(), DeviceError> {
+        AcquisitionSession::stop(self)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_acquisition_loop(
+    mut session: impl AcquisitionIo,
+    info: AcquisitionInfo,
+    config: AcquisitionWorkerConfig,
+    data_tx: SyncSender<SampleBlock>,
+    status_tx: mpsc::Sender<WorkerStatus>,
+    stim_event_tx: SyncSender<AcquisitionStimEvent>,
+    command_rx: Receiver<WorkerCommand>,
+    stats: Arc<AcquisitionStatsInner>,
+    next_sample_index_shared: Arc<AtomicU64>,
+    emergency_latched: Arc<AtomicBool>,
+) {
     let _ = status_tx.send(WorkerStatus::Started(info.clone()));
 
     let mut tracker = TimestampTracker::default();
     let mut block_sequence = 0_u64;
     let channels: Vec<ChannelId> = (0..info.channel_count)
         .map(|channel| ChannelId {
-            stream: info.target_stream,
-            channel: channel as u8,
+            stream: info.streams[channel / 16],
+            channel: (channel % 16) as u8,
         })
         .collect();
     let source_id = format!("rhs-port-{}", char::from(b'A' + info.target_port));
@@ -695,12 +1014,54 @@ fn run_worker(
     let mut seen_stim_ids = BTreeSet::<u64>::new();
     let mut next_sample_index = 0_u64;
     let configured_stimulation = config.stimulation.as_ref();
+    let selected_mask =
+        configured_stimulation.map_or(0, |stim| stimulation_sample_mask(stim, &info.streams));
+    let mut emergency_seen = false;
 
     'worker: loop {
         loop {
-            match command_rx.try_recv() {
+            let command = if emergency_latched.load(Ordering::Acquire) && !emergency_seen {
+                emergency_seen = true;
+                Ok(WorkerCommand::EmergencyStop)
+            } else {
+                command_rx.try_recv()
+            };
+            match command {
+                Ok(WorkerCommand::ScheduleBatch(requests)) => {
+                    let result = if emergency_seen {
+                        Err("emergency stop is latched")
+                    } else {
+                        enqueue_stim_batch(
+                            &mut pending_stim,
+                            &mut seen_stim_ids,
+                            &requests,
+                            next_sample_index,
+                            config.command_queue_capacity,
+                        )
+                    };
+                    for request in requests {
+                        let event = AcquisitionStimEvent {
+                            command_id: request.command_id,
+                            state: if result.is_ok() {
+                                AcquisitionStimState::Queued
+                            } else {
+                                AcquisitionStimState::Rejected
+                            },
+                            target_sample_index: request.target_sample_index,
+                            sample_index: Some(next_sample_index),
+                            message: result
+                                .err()
+                                .unwrap_or("hardware schedule accepted atomically")
+                                .to_owned(),
+                        };
+                        if let Err(error) = send_stim_event(&stim_event_tx, event) {
+                            terminal_fault = Some(error);
+                            break 'worker;
+                        }
+                    }
+                }
                 Ok(WorkerCommand::ScheduleStim(request)) => {
-                    let event = if configured_stimulation.is_none() {
+                    let event = if configured_stimulation.is_none() || emergency_seen {
                         AcquisitionStimEvent {
                             command_id: request.command_id,
                             state: AcquisitionStimState::Rejected,
@@ -825,7 +1186,7 @@ fn run_worker(
             }
         }
 
-        if active_stim.is_none() {
+        if active_stim.is_none() && !emergency_latched.load(Ordering::Acquire) {
             while let Some(request) = pending_stim.front() {
                 if request.deadline_sample_index < next_sample_index {
                     let request = pending_stim
@@ -852,6 +1213,7 @@ fn run_worker(
                     .pop_front()
                     .expect("pending stimulation command was checked");
                 if let Err(error) = session.trigger_stim() {
+                    pending_stim.push_front(request);
                     terminal_fault = Some(error);
                     break 'worker;
                 }
@@ -874,6 +1236,7 @@ fn run_worker(
                     trigger_after_sample_index: next_sample_index,
                     first_observed_sample_index: None,
                     completion_sample_index: None,
+                    observed_mask: 0,
                 });
                 break;
             }
@@ -911,15 +1274,27 @@ fn run_worker(
         let mut flags = SampleFlags::empty();
         if discontinuity {
             flags.insert(SampleFlags::DISCONTINUITY);
+            if active_stim.is_some() || !pending_stim.is_empty() {
+                emergency_latched.store(true, Ordering::Release);
+                terminal_fault = Some(DeviceError::new(
+                    DeviceErrorCode::ProtocolError,
+                    "sample timestamp discontinuity while stimulation was pending; output disabled",
+                ));
+                break;
+            }
         }
         if batch.stim_on.iter().any(|mask| *mask != 0) {
             flags.insert(SampleFlags::STIM_ARTIFACT);
         }
 
-        if let Some((offset, compliance_mask)) =
-            first_active_compliance(active_stim.is_some(), &batch.compliance_limit)
-        {
+        if let Some((offset, compliance_mask)) = first_active_compliance(
+            active_stim.is_some(),
+            &batch.compliance_limit,
+            selected_mask,
+        ) {
             let sample_index = first_sample_index.saturating_add(offset as u64);
+            let channels = compliance_channels(compliance_mask, &info.streams);
+            emergency_latched.store(true, Ordering::Release);
             let active = active_stim.take();
             if configured_stimulation.is_some() {
                 if let Err(error) = session.cancel_stim() {
@@ -937,7 +1312,7 @@ fn run_worker(
                     .map_or(0, |active| active.request.target_sample_index),
                 sample_index: Some(sample_index),
                 message: format!(
-                    "RHS2116 compliance warning mask=0x{compliance_mask:04x}; stimulation disabled"
+                    "RHS2116 compliance warning mask=0x{compliance_mask:016x}, channels={channels}; stimulation disabled"
                 ),
             };
             if let Err(error) = send_stim_event(&stim_event_tx, event) {
@@ -947,14 +1322,18 @@ fn run_worker(
             terminal_fault = Some(DeviceError::new(
                 DeviceErrorCode::ProtocolError,
                 format!(
-                    "RHS2116 compliance warning at sample {sample_index}, mask=0x{compliance_mask:04x}"
+                    "RHS2116 compliance warning at sample {sample_index}, mask=0x{compliance_mask:016x}, channels={channels}; acquisition stopped and stimulation disabled"
                 ),
             ));
             break;
         }
 
         if let (Some(active), Some(stimulation)) = (active_stim.as_mut(), configured_stimulation) {
-            let channel_mask = 1_u16 << stimulation.channel;
+            let channel_mask = stimulation_sample_mask(stimulation, &info.streams);
+            active.observed_mask |= batch
+                .stim_on
+                .iter()
+                .fold(0_u64, |mask, sample| mask | (*sample & channel_mask));
             if active.first_observed_sample_index.is_none() {
                 if let Some(offset) = batch
                     .stim_on
@@ -984,9 +1363,10 @@ fn run_worker(
         }
 
         let completed = active_stim.as_ref().and_then(|active| {
-            active
-                .completion_sample_index
-                .filter(|completion| *completion < next_sample_index)
+            active.completion_sample_index.filter(|completion| {
+                *completion < next_sample_index
+                    && active.observed_mask & selected_mask == selected_mask
+            })
         });
         if let Some(completion_sample_index) = completed {
             if let Err(error) = session.cancel_stim() {
@@ -1011,7 +1391,7 @@ fn run_worker(
         }
 
         if active_stim.as_ref().is_some_and(|active| {
-            active.first_observed_sample_index.is_none()
+            active.observed_mask & selected_mask != selected_mask
                 && next_sample_index
                     > active
                         .trigger_after_sample_index
@@ -1027,8 +1407,10 @@ fn run_worker(
                 state: AcquisitionStimState::Fault,
                 target_sample_index: active.request.target_sample_index,
                 sample_index: Some(next_sample_index),
-                message: "no FPGA stim_on marker observed within one second; stimulation disabled"
-                    .to_owned(),
+                message: format!(
+                    "missing FPGA stim_on markers mask=0x{:016x} within one second; stimulation disabled",
+                    selected_mask & !active.observed_mask
+                ),
             };
             if let Err(error) = send_stim_event(&stim_event_tx, event) {
                 terminal_fault = Some(error);
@@ -1093,17 +1475,39 @@ fn run_worker(
         }
     }
     if let Some(error) = terminal_fault {
+        emergency_latched.store(true, Ordering::Release);
+        let requests = active_stim
+            .into_iter()
+            .map(|active| active.request)
+            .chain(pending_stim);
+        for request in requests {
+            let _ = send_stim_event(
+                &stim_event_tx,
+                AcquisitionStimEvent {
+                    command_id: request.command_id,
+                    state: AcquisitionStimState::Fault,
+                    target_sample_index: request.target_sample_index,
+                    sample_index: Some(next_sample_index),
+                    message: format!("acquisition stopped: {error}"),
+                },
+            );
+        }
         let _ = status_tx.send(WorkerStatus::Fault(error));
     } else {
         let _ = status_tx.send(WorkerStatus::Stopped);
     }
 }
 
+#[cfg(test)]
+#[path = "acquisition_worker_tests.rs"]
+mod worker_tests;
+
 struct ActiveAcquisitionStim {
     request: ScheduledStimRequest,
     trigger_after_sample_index: u64,
     first_observed_sample_index: Option<u64>,
     completion_sample_index: Option<u64>,
+    observed_mask: u64,
 }
 
 fn send_stim_event(
@@ -1163,6 +1567,29 @@ fn enqueue_stim_request(
     Ok(())
 }
 
+fn enqueue_stim_batch(
+    pending: &mut VecDeque<ScheduledStimRequest>,
+    seen: &mut BTreeSet<u64>,
+    requests: &[ScheduledStimRequest],
+    next: u64,
+    capacity: usize,
+) -> Result<(), &'static str> {
+    let mut staged_pending = pending.clone();
+    let mut staged_seen = seen.clone();
+    for request in requests {
+        enqueue_stim_request(
+            &mut staged_pending,
+            &mut staged_seen,
+            request.clone(),
+            next,
+            capacity,
+        )?;
+    }
+    *pending = staged_pending;
+    *seen = staged_seen;
+    Ok(())
+}
+
 fn stimulation_completion_sample(config: &StimConfig, observed_start: u64) -> u64 {
     let end_stim_steps =
         u64::try_from(config.phase_steps * 2 + config.interphase_steps).unwrap_or(u64::MAX);
@@ -1172,14 +1599,43 @@ fn stimulation_completion_sample(config: &StimConfig, observed_start: u64) -> u6
         .saturating_add(end_stim_steps)
 }
 
-fn first_active_compliance(active: bool, masks: &[u16]) -> Option<(usize, u16)> {
+fn stimulation_sample_mask(config: &StimConfig, streams: &[u8]) -> u64 {
+    if config.stream_masks.iter().any(|mask| *mask != 0) {
+        streams.iter().enumerate().fold(0, |mask, (index, stream)| {
+            mask | (u64::from(config.stream_masks[*stream as usize]) << (index * 16))
+        })
+    } else if config.channel_mask != 0 {
+        u64::from(config.channel_mask)
+    } else {
+        1_u64 << config.channel
+    }
+}
+
+fn first_active_compliance(active: bool, masks: &[u64], selected: u64) -> Option<(usize, u64)> {
     active.then(|| {
         masks
             .iter()
             .copied()
+            .map(|mask| mask & selected)
             .enumerate()
             .find(|(_, mask)| *mask != 0)
     })?
+}
+
+fn compliance_channels(mask: u64, streams: &[u8]) -> String {
+    (0..64)
+        .filter(|index| mask & (1_u64 << index) != 0)
+        .filter_map(|index| {
+            streams.get(index / 16).map(|stream| {
+                format!(
+                    "{}-{:03}",
+                    char::from(b'A' + stream / 2),
+                    usize::from(stream % 2) * 16 + index % 16
+                )
+            })
+        })
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 #[derive(Default)]
@@ -1259,6 +1715,7 @@ impl RawAcquisitionInfo {
             blocks_per_read: self.blocks_per_read as usize,
             target_stream: self.target_stream as u8,
             target_port: self.target_port as u8,
+            streams: Vec::new(),
             bytes_per_block: self.bytes_per_block as usize,
             pipe_read_error: self.pipe_read_error,
             device_serial: unsafe { CStr::from_ptr(self.device_serial.as_ptr()) }
@@ -1329,6 +1786,134 @@ fn error_from_code(code: i32, message: String) -> DeviceError {
 mod tests {
     use super::*;
 
+    fn test_info() -> AcquisitionInfo {
+        AcquisitionInfo {
+            sample_rate_hz: 30_000,
+            channel_count: 16,
+            samples_per_block: 128,
+            blocks_per_read: 8,
+            target_stream: 0,
+            target_port: 0,
+            streams: vec![0],
+            bytes_per_block: 0,
+            pipe_read_error: 0,
+            device_serial: "offline-test".to_owned(),
+            message: String::new(),
+        }
+    }
+
+    #[test]
+    fn terminal_fault_is_not_hidden_behind_started_status() {
+        for code in [
+            DeviceErrorCode::UsbReadFailed,
+            DeviceErrorCode::ProtocolError,
+        ] {
+            let (tx, rx) = mpsc::channel();
+            tx.send(WorkerStatus::Started(test_info())).unwrap();
+            let error = DeviceError::new(code, "original terminal fault");
+            tx.send(WorkerStatus::Fault(error.clone())).unwrap();
+            drop(tx);
+            assert_eq!(drain_worker_fault(&rx), Some(error));
+            assert_eq!(drain_worker_fault(&rx), None);
+        }
+    }
+
+    #[test]
+    fn empty_or_clean_worker_status_does_not_invent_a_fault() {
+        let (tx, rx) = mpsc::channel();
+        assert_eq!(drain_worker_fault(&rx), None);
+        tx.send(WorkerStatus::Started(test_info())).unwrap();
+        tx.send(WorkerStatus::Stopped).unwrap();
+        drop(tx);
+        assert_eq!(drain_worker_fault(&rx), None);
+    }
+
+    fn stopped_test_handle(panics: bool) -> AcquisitionHandle {
+        let (_data_tx, data_rx) = mpsc::sync_channel(1);
+        let (_event_tx, stim_event_rx) = mpsc::sync_channel(1);
+        let (command_tx, command_rx) = mpsc::sync_channel(4);
+        let (status_tx, status_rx) = mpsc::channel();
+        let join = thread::spawn(move || {
+            status_tx.send(WorkerStatus::Started(test_info())).unwrap();
+            command_rx.recv().unwrap();
+            assert!(!panics, "offline worker panic");
+            status_tx
+                .send(WorkerStatus::Fault(DeviceError::new(
+                    DeviceErrorCode::UsbReadFailed,
+                    "original USB fault",
+                )))
+                .unwrap();
+        });
+        AcquisitionHandle {
+            info: test_info(),
+            data_rx,
+            status_rx,
+            stim_event_rx,
+            command_tx,
+            stats: Arc::new(AcquisitionStatsInner::default()),
+            next_sample_index: Arc::new(AtomicU64::new(0)),
+            emergency_latched: Arc::new(AtomicBool::new(false)),
+            configured_stimulation: None,
+            join: Some(join),
+        }
+    }
+
+    #[test]
+    fn stop_returns_original_worker_fault_after_join() {
+        let error = stopped_test_handle(false).stop().unwrap_err();
+        assert_eq!(error.code, DeviceErrorCode::UsbReadFailed);
+        assert_eq!(error.message, "original USB fault");
+    }
+
+    #[test]
+    fn stop_preserves_worker_panic_detail() {
+        let error = stopped_test_handle(true).stop().unwrap_err();
+        assert!(error.message.contains("offline worker panic"));
+    }
+
+    #[test]
+    fn sixty_four_bit_feedback_and_stream_selection_are_preserved() {
+        let config = StimConfig {
+            stream_masks: [0, 0, 1, 0, 0, 0x8000, 0, 0],
+            ..StimConfig::default()
+        };
+        assert_eq!(
+            stimulation_sample_mask(&config, &[2, 3, 4, 5]),
+            1 | (1_u64 << 63)
+        );
+        assert_eq!(
+            first_active_compliance(true, &[0, 1_u64 << 63], 1_u64 << 63),
+            Some((1, 1_u64 << 63))
+        );
+        assert_eq!(
+            first_active_compliance(true, &[1_u64 << 62], 1_u64 << 63),
+            None
+        );
+    }
+
+    #[test]
+    fn hardware_batch_rejection_is_atomic() {
+        let mut pending = VecDeque::new();
+        let mut seen = BTreeSet::new();
+        let requests = [
+            ScheduledStimRequest {
+                command_id: 1,
+                target_sample_index: 100,
+                deadline_sample_index: 200,
+            },
+            ScheduledStimRequest {
+                command_id: 2,
+                target_sample_index: 200,
+                deadline_sample_index: 300,
+            },
+        ];
+        assert!(enqueue_stim_batch(&mut pending, &mut seen, &requests, 0, 1).is_err());
+        assert!(pending.is_empty());
+        assert!(seen.is_empty());
+        enqueue_stim_batch(&mut pending, &mut seen, &requests, 0, 2).unwrap();
+        assert_eq!(pending.len(), 2);
+    }
+
     #[test]
     fn config_rejects_invalid_batch_size() {
         let error = AcquisitionConfig { blocks_per_read: 0 }
@@ -1349,10 +1934,52 @@ mod tests {
     }
 
     #[test]
+    fn impedance_input_validation_is_bounded_before_opening_hardware() {
+        assert!(validate_impedance_request(64, 1000.0, &(0..64).collect::<Vec<_>>()).is_ok());
+        assert!(validate_impedance_request(16, 10.0, &[0, 15]).is_ok());
+        for (count, frequency, indices) in [
+            (120, 1000.0, vec![0]),
+            (16, 9.0, vec![0]),
+            (64, f64::NAN, vec![0]),
+            (64, 1000.0, vec![64]),
+            (16, 1000.0, vec![0, 0]),
+            (16, 1000.0, vec![]),
+        ] {
+            assert!(validate_impedance_request(count, frequency, &indices).is_err());
+        }
+    }
+
+    #[test]
+    fn cancelled_impedance_never_opens_hardware_or_reports_measurements() {
+        let cancelled = AtomicBool::new(true);
+        let device = RhsDevice::new("missing-impedance-cancellation-test.bit");
+        assert!(!device
+            .measure_impedances(64, 1000.0, &[0, 63], &cancelled, |_| panic!(
+                "cancelled task must not report data"
+            ))
+            .unwrap());
+    }
+
+    #[test]
+    fn compliance_addresses_use_selected_stream_order_including_high_bits() {
+        assert_eq!(compliance_channels(1, &[2, 3, 4, 5]), "B-000");
+        assert_eq!(
+            compliance_channels((1_u64 << 63) | (1_u64 << 16), &[2, 3, 4, 5]),
+            "B-016,C-031"
+        );
+        assert_eq!(compliance_channels(1_u64 << 15, &[6]), "D-015");
+        assert_eq!(compliance_channels(1, &[3]), "B-016");
+        assert_eq!(compliance_channels(0, &[2, 3, 4, 5]), "");
+    }
+
+    #[test]
     fn compliance_is_only_actionable_during_active_stimulation() {
         let masks = [0, 0x0004, 0x0008];
-        assert_eq!(first_active_compliance(false, &masks), None);
-        assert_eq!(first_active_compliance(true, &masks), Some((1, 0x0004)));
+        assert_eq!(first_active_compliance(false, &masks, u64::MAX), None);
+        assert_eq!(
+            first_active_compliance(true, &masks, u64::MAX),
+            Some((1, 0x0004))
+        );
     }
 
     #[test]

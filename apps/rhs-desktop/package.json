@@ -1,12 +1,14 @@
 {
   "name": "rhs-desktop-ui",
   "private": true,
+  "type": "module",
   "version": "0.1.0",
   "scripts": {
     "build": "node scripts/build.cjs",
     "dev": "node scripts/dev-server.cjs",
     "preview": "node scripts/dev-server.cjs --dist",
-    "test": "node scripts/test-ui.cjs && node scripts/test-mea.mjs"
+    "test:waveform-browser": "node scripts/test-waveform-browser.cjs",
+    "test": "node scripts/test-ui.cjs && node scripts/test-bridge.mjs && node scripts/test-mea.mjs && node scripts/test-stim-routing.mjs && node scripts/test-waveform.mjs && node scripts/test-analysis.mjs && node scripts/test-workspace-data.mjs && node scripts/test-impedance.mjs && node scripts/test-spikes.mjs && node scripts/test-recording.mjs && node scripts/test-spike-overlay.mjs"
   },
   "devDependencies": {
     "lucide": "0.468.0"

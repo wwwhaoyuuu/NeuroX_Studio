@@ -34,8 +34,48 @@
 #include <thread>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <climits>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 #include "rhxcontroller.h"
 #include "rhxregisters.h"
+
+namespace {
+bool readBitfile(const string& filename, vector<unsigned char>& contents)
+{
+    FILE* file = nullptr;
+#ifdef _WIN32
+    int wideLength = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, filename.c_str(), -1, nullptr, 0);
+    if (wideLength <= 0) return false;
+    vector<wchar_t> wideFilename(static_cast<size_t>(wideLength));
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, filename.c_str(), -1,
+                            wideFilename.data(), wideLength) <= 0) {
+        return false;
+    }
+    if (_wfopen_s(&file, wideFilename.data(), L"rb") != 0) return false;
+#else
+    file = fopen(filename.c_str(), "rb");
+    if (!file) return false;
+#endif
+
+    if (fseek(file, 0, SEEK_END) != 0) {
+        fclose(file);
+        return false;
+    }
+    long length = ftell(file);
+    if (length <= 0 || static_cast<unsigned long>(length) > ULONG_MAX) {
+        fclose(file);
+        return false;
+    }
+    rewind(file);
+    contents.resize(static_cast<size_t>(length));
+    bool success = fread(contents.data(), 1, contents.size(), file) == contents.size();
+    fclose(file);
+    return success;
+}
+}
 
 // This class provides access to and control of one of the following:
 //   (1) an Opal Kelly XEM6010 USB2/FPGA interface board running the Intan Rhythm interface Verilog code
@@ -117,7 +157,12 @@ int RHXController::open()
 // Upload the configuration file (bitfile) to the FPGA.  Return true if successful.
 bool RHXController::uploadFPGABitfile(const string& filename)
 {
-    okCFrontPanel::ErrorCode errorCode = dev->ConfigureFPGA(filename);
+    vector<unsigned char> bitstream;
+    okCFrontPanel::ErrorCode errorCode = okCFrontPanel::FileError;
+    if (readBitfile(filename, bitstream)) {
+        errorCode = dev->ConfigureFPGAFromMemory(bitstream.data(),
+                                                static_cast<unsigned long>(bitstream.size()));
+    }
 
     switch (errorCode) {
     case okCFrontPanel::NoError:
