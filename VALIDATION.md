@@ -1117,6 +1117,10 @@ Rust 测试覆盖节点顺序、多 threshold 接收器、重复 ID、未知版�
   or invalid arguments without installing a driver. Normal installation requires
   administrator rights and explicit confirmation, uses only USB INF installation,
   and does not force replacement, delete drivers, reboot or alter security policy.
+- The dependency check initializes its default app directory after parameter
+  binding, including Windows PowerShell 5 `-File` invocation. It verifies the
+  bundled firmware hash without opening the device; installed runtime checks are
+  local environment checks, not proof of a fresh-PC installation.
 - `scripts/Test-ReleasePackage.ps1 -Version 2026.11.05-hardware1` verifies every
   runtime ZIP entry against manifest sizes/hashes and the unpacked payload,
   pinned hardware hashes, catalog signatures, helper dry run, source file list

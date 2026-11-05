@@ -1,10 +1,11 @@
 [CmdletBinding()]
 param(
-    [string]$AppDirectory = $PSScriptRoot,
+    [string]$AppDirectory,
     [switch]$SkipFirmware
 )
 
 $ErrorActionPreference = "Stop"
+if (-not $AppDirectory) { $AppDirectory = $PSScriptRoot }
 $script:failures = 0
 function Report([bool]$Okay, [string]$Name, [string]$Detail) {
     if ($Okay) { Write-Output "[OK] $Name : $Detail" }
